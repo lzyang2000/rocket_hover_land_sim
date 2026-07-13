@@ -63,7 +63,15 @@ MPC_TERMINAL_HANDOFF_HEIGHT_M = 7.0
 AUTO_LAND_FUEL_MARGIN = 1.05
 AUTO_LAND_FUEL_CHECK_PERIOD_S = 0.25
 AUTO_LAND_TAKEOVER_MIN_HEIGHT_M = 0.15
-AUTO_LAND_FIXED_FUEL_RESERVE_KG = 100.0
+AUTO_LAND_FIXED_FUEL_RESERVE_KG = 400.0
+AUTO_LAND_ALIGNMENT_SPEED_MPS = 1.5
+AUTO_LAND_ALIGNMENT_BRAKING_ACCEL_MPS2 = 0.75
+AUTO_LAND_ALIGNMENT_SETTLE_TIME_S = 4.0
+AUTO_LAND_DESCENT_TIME_MARGIN = 1.20
+AUTO_LAND_CONTROL_IMPULSE_MARGIN = 1.20
+AUTO_LAND_MINIMUM_TAKEOVER_FUEL_KG = 6_000.0
+AUTO_LAND_HEIGHT_RESERVE_KG_PER_M = 50.0
+AUTO_LAND_HORIZONTAL_RESERVE_KG_PER_M = 200.0
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 ASYNC_MPC_MAX_ACCEPT_AGE_S = 0.35
@@ -115,7 +123,7 @@ GUI_PANEL_MARGIN = 22.0
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.19 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.20 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -726,33 +734,58 @@ class RocketSimulation:
   def estimated_landing_fuel_kg(self) -> float:
     """Estimate remaining propellant required to align, descend, and brake."""
 
-    height = max(
-      float(self.data.qpos[2] - LANDING_PAD_POSITION[2]), 0.0
-    )
     position = self.center_of_mass_position_world()
     velocity = self.center_of_mass_velocity_world()
+    landed_com_altitude = float(self.landing_center_of_mass_position()[2])
+    staging_altitude = self._landing_staging_altitude_for_current_state(
+      fuel_takeover=True
+    )
+    staging_height = max(staging_altitude - landed_com_altitude, 0.0)
     horizontal_error = float(np.linalg.norm(position[0:2]))
     horizontal_speed = float(np.linalg.norm(velocity[0:2]))
-    align_time = min(
-      8.0,
-      max(horizontal_error / 3.0, horizontal_speed / 1.5),
-    )
-    descent_time = self.estimated_descent_time_seconds(height)
-    desired_descent_speed = self.descent_rate_for_height_mps(height)
-    excess_descent_speed = max(-float(velocity[2]) - desired_descent_speed, 0.0)
     mass = self.controller.wet_mass_kg
     gravity = abs(float(self.model.opt.gravity[2]))
-    estimated_impulse = (
+    minimum_thrust_acceleration = (
+      self.controller.limits.min_thrust_newtons / mass
+    )
+    upward_braking_acceleration = max(
+      gravity - minimum_thrust_acceleration, 1e-6
+    )
+    upward_speed = max(float(velocity[2]), 0.0)
+    upward_braking_time = upward_speed / upward_braking_acceleration
+    align_time = max(
+      horizontal_error / AUTO_LAND_ALIGNMENT_SPEED_MPS,
+      horizontal_speed / AUTO_LAND_ALIGNMENT_BRAKING_ACCEL_MPS2,
+      upward_braking_time,
+    ) + AUTO_LAND_ALIGNMENT_SETTLE_TIME_S
+    descent_time = (
+      AUTO_LAND_DESCENT_TIME_MARGIN
+      * self.estimated_descent_time_seconds(staging_height)
+    )
+    desired_descent_speed = self.descent_rate_for_height_mps(staging_height)
+    excess_descent_speed = max(-float(velocity[2]) - desired_descent_speed, 0.0)
+    estimated_impulse = AUTO_LAND_CONTROL_IMPULSE_MARGIN * (
       mass * gravity * (align_time + descent_time)
       + mass * (horizontal_speed + excess_descent_speed)
     )
-    return float(
+    impulse_estimate = float(
       self.controller.limits.alpha_kg_per_newton_second * estimated_impulse
       + AUTO_LAND_FIXED_FUEL_RESERVE_KG
     )
+    minimum_takeover_fuel = min(
+      self.controller.initial_fuel_mass_kg,
+      AUTO_LAND_MINIMUM_TAKEOVER_FUEL_KG
+      + AUTO_LAND_HEIGHT_RESERVE_KG_PER_M * staging_height
+      + AUTO_LAND_HORIZONTAL_RESERVE_KG_PER_M * horizontal_error,
+    )
+    controllability_floor = minimum_takeover_fuel / AUTO_LAND_FUEL_MARGIN
+    return max(impulse_estimate, controllability_floor)
 
   def fuel_takeover_threshold_kg(self) -> float:
-    return AUTO_LAND_FUEL_MARGIN * self.estimated_landing_fuel_kg()
+    return min(
+      self.controller.initial_fuel_mass_kg,
+      AUTO_LAND_FUEL_MARGIN * self.estimated_landing_fuel_kg(),
+    )
 
   def _check_fuel_reserve_takeover(self) -> None:
     if (
@@ -761,19 +794,25 @@ class RocketSimulation:
     ):
       return
     self.last_fuel_takeover_check_time = float(self.data.time)
+    if self.controller.engine_state is not EngineState.LIT:
+      self.last_estimated_landing_fuel_kg = 0.0
+      return
     estimate = self.estimated_landing_fuel_kg()
     self.last_estimated_landing_fuel_kg = estimate
     if (
       self.fuel_takeover_triggered
       or self.landing_active
       or self.landing_phase in (LandingPhase.COMPLETE, LandingPhase.ABORTED)
-      or self.controller.engine_state is not EngineState.LIT
     ):
       return
     height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
     if height <= AUTO_LAND_TAKEOVER_MIN_HEIGHT_M:
       return
-    if self.controller.fuel_mass_kg <= AUTO_LAND_FUEL_MARGIN * estimate:
+    takeover_threshold = min(
+      self.controller.initial_fuel_mass_kg,
+      AUTO_LAND_FUEL_MARGIN * estimate,
+    )
+    if self.controller.fuel_mass_kg <= takeover_threshold:
       self.start_landing(fuel_takeover=True)
 
   def _update_landing_guidance(self) -> None:

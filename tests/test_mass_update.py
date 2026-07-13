@@ -3,6 +3,7 @@ from rocket_landing.sim import RocketSimulation
 
 def test_propellant_mass_updates_do_not_reset_free_joint_position() -> None:
   simulation = RocketSimulation()
+  simulation.fuel_takeover_triggered = True
   simulation.controller.ignite()
   simulation.controller.throttle = 0.80
 

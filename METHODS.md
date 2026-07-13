@@ -371,15 +371,31 @@ t_d(h)=\int_0^h \frac{d\eta}{v_d(\eta)},
 where $v_d(h)$ is the nonzero piecewise descent speed above. The alignment-time estimate is
 
 \[
-t_a=\min\left(8,\max\left(\frac{\lVert r_{xy}\rVert}{3},
-\frac{\lVert v_{xy}\rVert}{1.5}\right)\right).
+t_a=\max\left(
+\frac{\lVert r_{xy}\rVert}{1.5},
+\frac{\lVert v_{xy}\rVert}{0.75},
+\frac{\max(v_z,0)}{g-T_{\min}/m}
+\right)+4\ \mathrm{s}.
 \]
 
-With current wet mass $m$, gravity magnitude $g$, horizontal speed $v_{xy}$, and excess downward speed $v_e=\max(-v_z-v_d(h),0)$, estimated fuel is
+The descent time is evaluated from the stopping-aware staging altitude rather than the current altitude and multiplied by 1.20. With current wet mass $m$, gravity magnitude $g$, horizontal speed $v_{xy}$, and excess downward speed $v_e=\max(-v_z-v_d(h),0)$, the impulse estimate is
 
 \[
-m_{f,\mathrm{land}}=\alpha\left[m g(t_a+t_d)
-+m(\lVert v_{xy}\rVert+v_e)\right]+100\ \mathrm{kg}.
+m_{f,I}=1.20\alpha\left[m g(t_a+1.20t_d)
++m(\lVert v_{xy}\rVert+v_e)\right]+400\ \mathrm{kg}.
+\]
+
+Rollout testing also showed that triggering solely from the impulse approximation could wait until the vehicle was too light for reliable lateral capture. The minimum safe takeover reserve is therefore
+
+\[
+m_{f,C}=\min\left(9000,
+6000+50h_s+200\lVert r_{xy}\rVert\right)\ \mathrm{kg},
+\]
+
+where $h_s$ is the stopping-aware staging height in metres. The displayed landing estimate is
+
+\[
+m_{f,\mathrm{land}}=\max\left(m_{f,I},\frac{m_{f,C}}{1.05}\right).
 \]
 
 When the engine is lit, the rocket is above the end-burn cutoff height, and remaining fuel satisfies
@@ -388,7 +404,7 @@ When the engine is lit, the rocket is above the end-burn cutoff height, and rema
 m_f\leq 1.05\,m_{f,\mathrm{land}},
 \]
 
-auto-land takes over and the trigger latches for the flight. Reserve takeover uses the current altitude as its alignment altitude, avoiding an unnecessary climb to the normal staging height. This is a conservative heuristic guard, not an MPC-derived certified propellant-to-go bound.
+auto-land takes over and the trigger latches for the flight. The threshold is capped at the initial 9,000 kg reserve, so an already marginal state requests landing immediately. Reserve takeover uses the current altitude as its alignment altitude, avoiding an unnecessary climb to the normal staging height, except where upward momentum requires a higher braking apex. The impulse margins and controllability floor are conservative empirical guards for this controller, not an MPC-derived certified propellant-to-go bound.
 
 ### Controller ownership indicator
 

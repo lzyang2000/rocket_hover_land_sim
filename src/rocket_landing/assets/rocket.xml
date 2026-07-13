@@ -56,11 +56,11 @@
       <geom name="lower_skirt" type="cylinder" pos="0 0 -18.15" size="1.90 0.75" material="soot"/>
       <geom name="octaweb" type="cylinder" pos="0 0 -19.22" size="1.66 0.32" material="carbon"/>
 
-      <!-- Four deployed grid fins near the top of the first stage. -->
-      <geom name="grid_fin_xp" type="box" pos="2.42 0 15.25" size="0.66 0.075 0.72" material="carbon" contype="0" conaffinity="0"/>
-      <geom name="grid_fin_xm" type="box" pos="-2.42 0 15.25" size="0.66 0.075 0.72" material="carbon" contype="0" conaffinity="0"/>
-      <geom name="grid_fin_yp" type="box" pos="0 2.42 15.25" size="0.075 0.66 0.72" material="carbon" contype="0" conaffinity="0"/>
-      <geom name="grid_fin_ym" type="box" pos="0 -2.42 15.25" size="0.075 0.66 0.72" material="carbon" contype="0" conaffinity="0"/>
+      <!-- Four horizontally deployed grid fins near the top of the first stage. -->
+      <geom name="grid_fin_xp" type="box" pos="2.42 0 15.25" size="0.66 0.72 0.075" material="carbon" contype="0" conaffinity="0"/>
+      <geom name="grid_fin_xm" type="box" pos="-2.42 0 15.25" size="0.66 0.72 0.075" material="carbon" contype="0" conaffinity="0"/>
+      <geom name="grid_fin_yp" type="box" pos="0 2.42 15.25" size="0.72 0.66 0.075" material="carbon" contype="0" conaffinity="0"/>
+      <geom name="grid_fin_ym" type="box" pos="0 -2.42 15.25" size="0.72 0.66 0.075" material="carbon" contype="0" conaffinity="0"/>
 
       <!-- Canonical deployed leg geometry; Python animates it from stowed poses. -->
       <geom name="leg_xp" type="capsule" fromto="1.63 0 -13.10 8.50 0 -20.38" size="0.16" material="leg"/>

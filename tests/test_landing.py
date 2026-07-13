@@ -83,6 +83,7 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
 
 def test_auto_land_after_manual_takeoff_captures_the_braking_apex() -> None:
   simulation = RocketSimulation()
+  simulation.fuel_takeover_triggered = True
   simulation.controller.ignite()
   simulation.controller.throttle = 0.80
 
@@ -290,6 +291,37 @@ def test_fuel_reserve_takeover_triggers_at_105_percent_and_latches() -> None:
   simulation._check_fuel_reserve_takeover()
   assert simulation.landing_phase is LandingPhase.INACTIVE
   assert not simulation.fuel_takeover_active
+
+
+def test_real_fuel_reserve_takeover_keeps_enough_fuel_to_land() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.ignite()
+  simulation.data.qpos[0:3] = (
+    4.0,
+    -3.0,
+    ROCKET_LANDED_COM_Z_M + 15.0,
+  )
+  simulation.data.qvel[0:3] = (1.0, -0.5, 1.5)
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  takeover_threshold = simulation.fuel_takeover_threshold_kg()
+  assert 7_500.0 < takeover_threshold < 9_000.0
+  simulation.controller.fuel_mass_kg = takeover_threshold
+  simulation._update_model_mass(force=True)
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  simulation._check_fuel_reserve_takeover()
+  assert simulation.landing_phase is LandingPhase.ALIGN
+  assert simulation.fuel_takeover_active
+
+  for _ in range(8_000):
+    simulation.step()
+    if simulation.landing_phase is LandingPhase.COMPLETE:
+      break
+
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+  assert simulation.controller.engine_state is EngineState.SHUTDOWN
+  assert simulation.controller.fuel_mass_kg > 1_000.0
 
 
 def test_full_fuel_does_not_trigger_reserve_takeover() -> None:

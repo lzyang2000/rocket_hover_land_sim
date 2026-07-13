@@ -29,6 +29,7 @@ def test_hover_feedforward_matches_weight_with_com_migration_compensation() -> N
 
 def test_hover_brakes_velocity_and_returns_to_captured_position() -> None:
   simulation = RocketSimulation()
+  simulation.fuel_takeover_triggered = True
   simulation.data.qpos[0:3] = (0.0, 0.0, ROCKET_LANDED_COM_Z_M + 10.0)
   simulation.data.qvel[0:3] = (2.0, -1.0, 5.0)
   mujoco.mj_forward(simulation.model, simulation.data)
@@ -68,6 +69,7 @@ def test_hover_target_lead_is_bounded_relative_to_the_rocket() -> None:
 
 def test_mpc_tracks_a_wasd_style_moving_position_target() -> None:
   simulation = RocketSimulation(enable_mpc=True)
+  simulation.fuel_takeover_triggered = True
   simulation.data.qpos[0:3] = (0.0, 0.0, ROCKET_LANDED_COM_Z_M + 10.0)
   simulation.data.qvel[:] = 0.0
   mujoco.mj_forward(simulation.model, simulation.data)

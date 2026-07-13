@@ -94,6 +94,12 @@ def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   foot_id = mujoco.mj_name2id(
     simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "foot_xp"
   )
+  grid_fin_xp_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "grid_fin_xp"
+  )
+  grid_fin_yp_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "grid_fin_yp"
+  )
 
   assert 2.0 * simulation.model.geom_size[fuselage_id, 0] == pytest.approx(
     ROCKET_DIAMETER_M
@@ -101,6 +107,12 @@ def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   assert ROCKET_HEIGHT_M / ROCKET_DIAMETER_M == pytest.approx(11.26, rel=0.01)
   assert simulation.data.qpos[2] == pytest.approx(ROCKET_LANDED_COM_Z_M)
   assert simulation.model.geom_pos[foot_id, 0] == pytest.approx(2.05)
+  assert simulation.model.geom_size[grid_fin_xp_id] == pytest.approx(
+    np.array([0.66, 0.72, 0.075])
+  )
+  assert simulation.model.geom_size[grid_fin_yp_id] == pytest.approx(
+    np.array([0.72, 0.66, 0.075])
+  )
 
   simulation._set_landing_leg_deployment(1.0)
   assert simulation.model.geom_pos[foot_id, 0] == pytest.approx(8.50)
@@ -203,6 +215,7 @@ def test_thrust_arrow_is_appended_only_while_engine_is_lit() -> None:
 
 def test_powered_six_dof_controller_removes_axial_spin_and_tilt_rates() -> None:
   simulation = RocketSimulation()
+  simulation.fuel_takeover_triggered = True
   yaw = math.radians(12.0)
   simulation.data.qpos[3:7] = (
     math.cos(yaw / 2.0),
