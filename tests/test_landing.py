@@ -104,6 +104,27 @@ def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> No
   assert -0.35 <= float(flight.data.qvel[2]) <= 0.10
 
 
+def test_align_phase_accepts_a_coarser_pad_capture() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[0:3] = (
+    1.25,
+    0.0,
+    ROCKET_LANDED_COM_Z_M + 12.0,
+  )
+  simulation.data.qvel[0:3] = (0.50, 0.0, 0.50)
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.ALIGN
+  simulation.landing_staging_altitude = (
+    simulation.center_of_mass_position_world()[2]
+  )
+
+  simulation._update_landing_guidance()
+
+  assert simulation.landing_phase is LandingPhase.DESCEND
+
+
 def test_scvx_mpc_flies_terminal_descent_and_cuts_off() -> None:
   simulation = RocketSimulation(enable_mpc=True)
   simulation.data.qpos[0:3] = (
@@ -119,6 +140,9 @@ def test_scvx_mpc_flies_terminal_descent_and_cuts_off() -> None:
   simulation.hover_target_position = simulation.data.qpos[0:3].copy()
 
   saw_valid_mpc_command = False
+  maximum_terminal_gimbal = 0.0
+  terminal_gimbal_reversals = 0
+  previous_terminal_gimbal = None
   for _ in range(3000):
     simulation.step()
     saw_valid_mpc_command |= (
@@ -126,13 +150,35 @@ def test_scvx_mpc_flies_terminal_descent_and_cuts_off() -> None:
       and simulation.last_mpc_result.success
       and not simulation.mpc_using_fallback
     )
+    height = float(simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M)
+    if 0.0 < height <= 2.5:
+      gimbal = simulation.engine_gimbal_radians.copy()
+      maximum_terminal_gimbal = max(
+        maximum_terminal_gimbal, float(np.linalg.norm(gimbal))
+      )
+      if (
+        previous_terminal_gimbal is not None
+        and np.linalg.norm(previous_terminal_gimbal) > 1e-3
+        and np.linalg.norm(gimbal) > 1e-3
+        and np.dot(previous_terminal_gimbal, gimbal) < 0.0
+      ):
+        terminal_gimbal_reversals += 1
+      previous_terminal_gimbal = gimbal
     if simulation.landing_phase is LandingPhase.COMPLETE:
       break
 
   assert simulation.landing_phase is LandingPhase.COMPLETE
   assert saw_valid_mpc_command
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
-  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.10
+  assert maximum_terminal_gimbal <= np.radians(1.5) + 1e-6
+  assert terminal_gimbal_reversals == 0
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.30
   assert np.linalg.norm(
     simulation.center_of_mass_velocity_world()[0:2]
-  ) < 0.10
+  ) < 0.21
+
+  for _ in range(1_000):
+    simulation.step()
+
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.50
+  assert np.linalg.norm(simulation.data.qvel[0:3]) < 0.05

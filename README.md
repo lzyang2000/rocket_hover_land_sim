@@ -71,7 +71,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.1`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.2`.
 
 ## Controls
 
@@ -111,7 +111,7 @@ During hover and auto-land, the slider becomes read-only and changes color to in
 
 ### 3-D thrust arrow
 
-A colored arrow is anchored at the center engine and follows the actual gimbal command in manual, hover, and auto-land modes. Arrow length and thickness scale with applied thrust, while its color moves from orange toward cyan as thrust increases. It disappears immediately when the engine is off or killed.
+A colored arrow is anchored at the center engine and follows the actual lagged gimbal state in manual, hover, and auto-land modes. Arrow length and thickness scale with applied thrust, while its color moves from orange toward cyan as thrust increases. It disappears immediately when the engine is off or killed.
 
 The arrow is deliberately drawn outward through the visible plume, so it shows the nozzle/exhaust direction. The reaction force applied to the rocket points in the opposite direction.
 
@@ -139,7 +139,7 @@ Telemetry reports `SCVX MPC: OPTIMAL` and the latest solve time when the optimiz
 
 Press `L` or click `AUTO LAND`.
 
-The state machine supplies moving position and velocity references to the same 6-DOF MPC. It first holds altitude while braking and aligning over the pad center, then uses an aggressive approach with terminal braking:
+The state machine supplies moving position and velocity references to the same 6-DOF MPC. ALIGN now permits descent once the stage is within 1.5 m of pad center, below 0.75 m/s horizontal speed, and within 1 m and 0.75 m/s of the staging altitude. It then uses an aggressive approach with terminal braking:
 
 - 12 m/s above 30 m;
 - 8 m/s from 18 to 30 m;
@@ -149,7 +149,9 @@ The state machine supplies moving position and velocity references to the same 6
 - 0.6 m/s from 1 to 2.5 m;
 - 0.25 m/s inside the final meter.
 
-The engine cuts directly to zero only when horizontal error is small, horizontal speed is below 0.10 m/s, vertical speed is inside the touchdown window, and the rocket is within 10 cm of its landing body height.
+To prevent low-altitude hunting, the physical gimbal follows commands through an actuator lag and is limited to 3° below 5 m, 1.5° below 2.5 m, and 0.75° in the final meter. Very small terminal commands enter a 0.15° deadband.
+
+The engine cuts directly to zero once horizontal error is below 0.30 m, horizontal speed is below 0.20 m/s, vertical speed is inside the touchdown window, and the rocket is within 10 cm of its landing body height. The legs and pad friction then settle the small residual motion instead of the engine hovering close to the ground and repeatedly correcting it.
 
 ## Falcon 9-like dimensions and dynamics
 

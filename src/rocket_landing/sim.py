@@ -42,6 +42,9 @@ MAX_ROLL_CONTROL_TORQUE_NM = (
   2.0 * ROLL_RCS_LEVER_ARM_M * ROLL_RCS_MAX_THRUSTER_FORCE_N
 )
 ROLL_RCS_TIME_CONSTANT_S = 0.10
+GIMBAL_TIME_CONSTANT_S = 0.08
+TERMINAL_GIMBAL_TIME_CONSTANT_S = 0.20
+TERMINAL_GIMBAL_DEADBAND_RADIANS = math.radians(0.15)
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
@@ -59,7 +62,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.1 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.2 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -150,6 +153,7 @@ class RocketSimulation:
     self.last_mpc_result: MPCResult | None = None
     self.last_mpc_request_time = -math.inf
     self.mpc_using_fallback = True
+    self.engine_gimbal_command_radians = np.zeros(2, dtype=float)
     self.engine_gimbal_radians = np.zeros(2, dtype=float)
     self.roll_control_torque_command_nm = 0.0
     self.roll_control_torque_nm = 0.0
@@ -171,6 +175,7 @@ class RocketSimulation:
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
+    self.engine_gimbal_command_radians[:] = 0.0
     self.engine_gimbal_radians[:] = 0.0
     self.roll_control_torque_command_nm = 0.0
     self.roll_control_torque_nm = 0.0
@@ -360,10 +365,10 @@ class RocketSimulation:
         self.landing_staging_altitude,
       )
       aligned = (
-        horizontal_error < 0.30
-        and horizontal_speed < 0.20
-        and abs(position[2] - self.landing_staging_altitude) < 0.50
-        and abs(velocity[2]) < 0.25
+        horizontal_error < 1.50
+        and horizontal_speed < 0.75
+        and abs(position[2] - self.landing_staging_altitude) < 1.00
+        and abs(velocity[2]) < 0.75
       )
       if aligned:
         self.landing_phase = LandingPhase.DESCEND
@@ -386,8 +391,8 @@ class RocketSimulation:
       ready_for_cutoff = (
         height < 0.10
         and -0.35 <= body_velocity[2] <= 0.10
-        and horizontal_error < 0.20
-        and horizontal_speed < 0.10
+        and horizontal_error < 0.30
+        and horizontal_speed < 0.20
       )
       if ready_for_cutoff:
         self._invalidate_mpc_solution()
@@ -524,7 +529,7 @@ class RocketSimulation:
     magnitude = float(np.linalg.norm(gimbal))
     if magnitude > max_gimbal:
       gimbal *= max_gimbal / magnitude
-    self.engine_gimbal_radians[:] = gimbal
+    self.engine_gimbal_command_radians[:] = gimbal
     self.roll_control_torque_command_nm = float(
       np.clip(
         command[ROLL_TORQUE],
@@ -534,7 +539,7 @@ class RocketSimulation:
     )
     rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
     self._set_lateral_indicator_from_world_direction(
-      rotation @ gimbal_direction_body(self.engine_gimbal_radians)
+      rotation @ gimbal_direction_body(self.engine_gimbal_command_radians)
     )
     self.mpc_using_fallback = False
 
@@ -635,7 +640,7 @@ class RocketSimulation:
 
   def _allocate_attitude_control(self, desired_up: np.ndarray) -> None:
     if self.controller.engine_state is not EngineState.LIT:
-      self.engine_gimbal_radians[:] = 0.0
+      self.engine_gimbal_command_radians[:] = 0.0
       self.roll_control_torque_command_nm = 0.0
       return
     desired_torque = self._attitude_control_torque_body(desired_up)
@@ -657,10 +662,10 @@ class RocketSimulation:
       requested_lateral_force *= max_lateral_force / requested_magnitude
       requested_magnitude = max_lateral_force
     if thrust <= 0.0 or requested_magnitude < 1e-9:
-      self.engine_gimbal_radians[:] = 0.0
+      self.engine_gimbal_command_radians[:] = 0.0
     else:
       angle = math.asin(min(requested_magnitude / thrust, math.sin(max_angle)))
-      self.engine_gimbal_radians[:] = (
+      self.engine_gimbal_command_radians[:] = (
         requested_lateral_force / requested_magnitude * angle
       )
     self.roll_control_torque_command_nm = float(
@@ -670,6 +675,60 @@ class RocketSimulation:
         MAX_ROLL_CONTROL_TORQUE_NM,
       )
     )
+
+  def _terminal_gimbal_limit_radians(self) -> float:
+    mechanical_limit = math.radians(
+      self.controller.limits.pointing_half_angle_deg
+    )
+    if self.landing_phase is not LandingPhase.DESCEND:
+      return mechanical_limit
+    height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+    if height <= 1.0:
+      return math.radians(0.75)
+    if height <= 2.5:
+      return math.radians(1.5)
+    if height <= 5.0:
+      return math.radians(3.0)
+    return mechanical_limit
+
+  @staticmethod
+  def _limit_vector_magnitude(vector: np.ndarray, limit: float) -> np.ndarray:
+    result = np.asarray(vector, dtype=float).copy()
+    magnitude = float(np.linalg.norm(result))
+    if magnitude > limit > 0.0:
+      result *= limit / magnitude
+    return result
+
+  def _update_engine_gimbal_actuator(self) -> None:
+    """Track the commanded gimbal with lag and terminal authority limits."""
+
+    target = (
+      self.engine_gimbal_command_radians
+      if self.controller.engine_state is EngineState.LIT
+      else np.zeros(2, dtype=float)
+    )
+    limit = self._terminal_gimbal_limit_radians()
+    target = self._limit_vector_magnitude(target, limit)
+    terminal = (
+      self.landing_phase is LandingPhase.DESCEND
+      and float(self.data.qpos[2] - LANDING_PAD_POSITION[2]) <= 5.0
+    )
+    if terminal and np.linalg.norm(target) < TERMINAL_GIMBAL_DEADBAND_RADIANS:
+      target[:] = 0.0
+    time_constant = (
+      TERMINAL_GIMBAL_TIME_CONSTANT_S
+      if terminal
+      else GIMBAL_TIME_CONSTANT_S
+    )
+    blend = 1.0 - math.exp(-self.model.opt.timestep / time_constant)
+    self.engine_gimbal_radians += blend * (
+      target - self.engine_gimbal_radians
+    )
+    self.engine_gimbal_radians[:] = self._limit_vector_magnitude(
+      self.engine_gimbal_radians, limit
+    )
+    if np.linalg.norm(self.engine_gimbal_radians) < 1e-8:
+      self.engine_gimbal_radians[:] = 0.0
 
   def _update_roll_actuator(self) -> None:
     """Apply a first-order valve/manifold response to the RCS command."""
@@ -837,6 +896,7 @@ class RocketSimulation:
     else:
       self._poll_mpc_result()
       self._allocate_attitude_control(self.controller.thrust_direction_world())
+    self._update_engine_gimbal_actuator()
     self._update_roll_actuator()
     self.controller.consume_fuel(self.model.opt.timestep)
     self._update_model_mass()

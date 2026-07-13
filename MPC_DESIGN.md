@@ -94,6 +94,8 @@ If the solver is unavailable, infeasible, numerically invalid, or exceeds the ac
 
 MuJoCo receives the engine force at the `thrust_origin` site rather than at the center of mass. The resulting fuel-dependent moment arm creates physical pitch/yaw torque. Roll is not injected as a pure torque: two equal and opposite tangential forces act at sites 1.75 m to either side of the body axis. Their net force is zero and their moments add about the body axis. Each modeled pod is limited to 5 kN, giving 17.5 kN m maximum roll moment, and the applied moment follows the command through a 0.10 s first-order response.
 
+The main-engine gimbal is also a dynamic actuator rather than an instantaneous control. Its normal response time is 0.08 s. Below 5 m, a slower 0.20 s response, progressively smaller angle limits, and a small-command deadband suppress terminal control reversals. The MPC still optimizes the bounded commanded angle, while MuJoCo applies the lagged mechanical state.
+
 The dry structure and effective LOX/RP-1 liquid columns determine mass, center of mass, and principal inertia. The same mass-property function is used by MuJoCo and the nonlinear MPC rollout. As the COM moves, the MPC recomputes the engine position relative to it.
 
 Manual mode uses a full SO(3) attitude controller and the same physical actuator allocation. It holds heading as well as body tilt, fixing the previous underdetermined-yaw behavior.

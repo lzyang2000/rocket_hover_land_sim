@@ -177,6 +177,8 @@ The mechanical gimbal constraint is the second-order cone
 \lVert\delta\rVert_2\leq20^\circ.
 \]
 
+MuJoCo does not apply this command instantaneously. The mechanical gimbal state follows it through a 0.08 s first-order actuator. During terminal descent the response time becomes 0.20 s and available angle is scheduled to 3 degrees below 5 m, 1.5 degrees below 2.5 m, and 0.75 degrees below 1 m. Commands smaller than 0.15 degrees are suppressed in this terminal regime. This removes rapid MPC direction reversals that previously appeared as low-altitude wobble.
+
 Equivalent roll-RCS moment is bounded by
 
 \[
@@ -279,7 +281,7 @@ Auto-land supplies references through two phases:
 
 ### Align
 
-The controller moves above the pad and stabilizes position, velocity, attitude, and angular rate. Descent begins after horizontal error, speed, altitude, and vertical-speed tolerances are satisfied.
+The controller moves above the pad and stabilizes position, velocity, attitude, and angular rate. Descent begins once horizontal error is below 1.5 m, horizontal speed is below 0.75 m/s, staging-altitude error is below 1 m, and vertical speed is below 0.75 m/s. These deliberately coarse gates avoid spending excessive time seeking a perfect high-altitude alignment.
 
 ### Descend
 
@@ -293,7 +295,7 @@ The target altitude and vertical-velocity reference descend at:
 - 0.6 m/s from 1 to 2.5 m;
 - 0.25 m/s below 1 m.
 
-The high-altitude bands create a visibly forceful approach, while the final bands reserve enough altitude for powered braking. Engine cutoff occurs only near the landed center-of-mass height with small horizontal error, less than 0.10 m/s horizontal speed, and a bounded descent rate. MuJoCo then resolves landing-leg contact and settling.
+The high-altitude bands create a visibly forceful approach, while the final bands reserve enough altitude for powered braking. Engine cutoff occurs near the landed body/leg reference height with less than 0.30 m horizontal error, less than 0.20 m/s horizontal speed, and a bounded descent rate. MuJoCo then resolves the deliberately small residual motion through landing-leg contact and pad friction rather than holding the engine on for repeated terminal corrections.
 
 The phase logic is intentionally separate from the optimizer. It provides interpretable reference generation while the MPC handles coupled six-degree-of-freedom tracking and actuator constraints.
 
