@@ -24,8 +24,8 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
 - Automatic landing takeover at 1.05 times the estimated landing-fuel reserve.
 - Deterministic 6-DOF fallback control if an MPC solve fails.
-- A controller-owner badge that reports `MPC ACTIVE`, `FALLBACK ACTIVE`, or
-  `MANUAL TVC`.
+- A controller-owner badge that reports `MPC ACTIVE`, `TERMINAL ACTIVE`,
+  `FALLBACK ACTIVE`, or `MANUAL TVC`.
 
 ## Requirements
 
@@ -74,7 +74,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.3`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.4`.
 
 ## Controls
 
@@ -136,13 +136,15 @@ In hover mode:
 - Up/Down moves the altitude target at 2 m/s;
 - releasing the controls leaves the target fixed and the controller settles there.
 
-Telemetry reports `SCVX MPC: OPTIMAL` and the latest solve time when the optimizer owns the vehicle. `6-DOF FALLBACK` means the deterministic backup controller is active. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, orange `FALLBACK ACTIVE`, or gray `MANUAL TVC`.
+WASD remains position-target driven: the position error and measured rocket velocity provide the PD/MPC feedback needed to track the moving waypoint. The controller does not falsely label the waypoint itself as travelling at 2 m/s. Because the gimbaled engine is below the center of mass, the rocket must briefly counter-gimbal and move slightly opposite the requested direction to create the required tilt before accelerating toward the target. Automatic control now limits that maneuver to 6° of gimbal, substantially reducing the initial excursion and overshoot.
+
+Telemetry reports `SCVX MPC: OPTIMAL` and the latest solve time when the optimizer owns the vehicle. `6-DOF FALLBACK` means a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude controller handoff. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `FALLBACK ACTIVE`, or gray `MANUAL TVC`.
 
 ### Automatic landing
 
 Press `L` or click `AUTO LAND`.
 
-The state machine supplies moving position and velocity references to the same 6-DOF MPC. ALIGN now permits descent once the stage is within 1.5 m of pad center, below 0.75 m/s horizontal speed, and within 1 m and 0.75 m/s of the staging altitude. It then uses an aggressive approach with terminal braking:
+The state machine supplies moving position and velocity references to the 6-DOF MPC. During ALIGN, the reference is limited to a four-metre horizontal and two-metre vertical lead ahead of the measured rocket instead of jumping directly to the pad. Descent begins once the stage is within 1.5 m of pad center, below 0.75 m/s horizontal speed, and within 1 m and 0.75 m/s of the staging altitude. It then uses an aggressive approach with terminal braking:
 
 - 12 m/s above 30 m;
 - 8 m/s from 18 to 30 m;
@@ -153,6 +155,8 @@ The state machine supplies moving position and velocity references to the same 6
 - 0.25 m/s inside the final meter.
 
 Crossing a band boundary changes the reference directly to the next nonzero descent speed; guidance does not insert a zero-velocity hold between bands. The altitude reference remains a continuously integrated trajectory, so residual lateral alignment does not reset or jump the vertical target.
+
+Inside the optimizer, a nonzero reference velocity now advances the reference position at every prediction node. This removes the former contradiction that asked the MPC to remain at one fixed altitude while simultaneously tracking a downward velocity. MPC controls hover, alignment, and descent down to 7 m. The deterministic coupled 6-DOF controller then owns the final approach, where its direct feedback is more robust than the short-horizon optimizer under the progressively tight 3°, 1.5°, and 0.75° terminal gimbal limits.
 
 While the engine is lit outside auto-land, the simulator estimates the propellant needed to align, descend through this profile, and brake excess velocity. If fuel remaining falls to `1.05 ×` that estimate while the rocket is above the end-burn cutoff height, auto-land takes over once and latches. A reserve takeover aligns at the current altitude rather than climbing to the normal staging height. The estimate is deliberately conservative and heuristic—not a certified propellant-to-go result from the MPC—and includes a fixed 100 kg terminal reserve.
 

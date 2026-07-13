@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from rocket_landing.mpc import (
   ANGULAR_VELOCITY,
@@ -58,11 +59,16 @@ def test_scvx_mpc_returns_bounded_control_and_reduces_motion() -> None:
   target[QUATERNION] = (1.0, 0.0, 0.0, 0.0)
   target[ANGULAR_VELOCITY] = 0.0
 
-  result = controller.solve(state, target)
+  scheduled_gimbal_limit = math.radians(6.0)
+  result = controller.solve(
+    state,
+    target,
+    max_gimbal_radians=scheduled_gimbal_limit,
+  )
 
   assert result.success, result.status
   assert config.min_thrust_newtons <= result.control[THRUST] <= config.max_thrust_newtons
-  assert np.linalg.norm(result.control[GIMBAL]) <= config.max_gimbal_radians + 1e-7
+  assert np.linalg.norm(result.control[GIMBAL]) <= scheduled_gimbal_limit + 1e-7
   assert abs(result.control[ROLL_TORQUE]) <= config.max_roll_torque_nm + 1e-7
   assert np.linalg.norm(result.predicted_states[VELOCITY, -1]) < np.linalg.norm(
     state[VELOCITY]
@@ -73,6 +79,38 @@ def test_scvx_mpc_returns_bounded_control_and_reduces_motion() -> None:
     state[ANGULAR_VELOCITY.stop - 1]
   )
   assert result.scaled_dynamics_defect < 0.05
+
+
+def test_moving_reference_advances_position_across_the_horizon() -> None:
+  config = MPCConfig(horizon_steps=4, prediction_dt=0.25)
+  controller = SixDofMPC(config)
+  target = np.array(
+    [
+      30_000.0,
+      1.0,
+      -2.0,
+      30.0,
+      2.0,
+      1.0,
+      -3.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+    ]
+  )
+
+  references = controller._reference_trajectory(target)
+
+  assert references[POSITION, 2] == pytest.approx(
+    np.array([2.0, -1.5, 28.5])
+  )
+  assert references[VELOCITY, 2] == pytest.approx(
+    np.array([2.0, 1.0, -3.0])
+  )
 
 
 def test_mpc_prediction_respects_ground_and_tilt_constraints() -> None:

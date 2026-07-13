@@ -254,8 +254,11 @@ Telemetry distinguishes:
 
 - `SCVX MPC: OPTIMAL`;
 - `SCVX MPC: WARMING`;
+- `6-DOF TERMINAL`;
 - `6-DOF FALLBACK`;
 - manual `6-DOF TVC` control.
+
+The simulator uses a normalized nonlinear-defect acceptance limit of 0.20. This is less brittle than the previous 0.10 cutoff while remaining bounded by actuator limits and the independent MuJoCo plant. Automatic MPC gimbal authority is limited to 6°, inside the 20° mechanical cone.
 
 ## 8. Manual 6-DOF control
 
@@ -281,7 +284,7 @@ Auto-land supplies references through two phases:
 
 ### Align
 
-The controller moves above the pad and stabilizes position, velocity, attitude, and angular rate. Descent begins once horizontal error is below 1.5 m, horizontal speed is below 0.75 m/s, staging-altitude error is below 1 m, and vertical speed is below 0.75 m/s. These deliberately coarse gates avoid spending excessive time seeking a perfect high-altitude alignment.
+The controller moves above the pad and stabilizes position, velocity, attitude, and angular rate. Rather than jumping the reference directly to the pad, guidance places it at most 4 m horizontally and 2 m vertically ahead of the measured vehicle. This bounded reference lead reduces the acceleration, tilt, and MPC linearization change during a large capture maneuver. Descent begins once horizontal error is below 1.5 m, horizontal speed is below 0.75 m/s, staging-altitude error is below 1 m, and vertical speed is below 0.75 m/s. These deliberately coarse gates avoid spending excessive time seeking a perfect high-altitude alignment.
 
 ### Descend
 
@@ -296,6 +299,18 @@ The target altitude and vertical-velocity reference descend at:
 - 0.25 m/s below 1 m.
 
 The high-altitude bands create a visibly forceful approach, while the final bands reserve enough altitude for powered braking. The altitude reference is integrated continuously, and the velocity reference switches directly from one band speed to the next. No zero-speed waypoint is inserted at a band boundary, and the target altitude is not reset against the measured vehicle altitude.
+
+The MPC cost uses a trajectory of reference states rather than repeating one target state at every prediction node. If the current reference is $(r_d,v_d)$, prediction node $k$ uses
+
+\[
+r_{d,k}=r_d+k\Delta t\,v_d,
+\qquad
+v_{d,k}=v_d.
+\]
+
+This is essential during powered descent: the previous formulation penalized position relative to one fixed altitude while also requesting nonzero downward velocity. That internally inconsistent target produced large nonlinear defects, frequent fallback selection, and abrupt controller changes.
+
+MPC owns hover, alignment, and the descent above 7 m. At 7 m the controller deliberately hands off to the deterministic coupled 6-DOF terminal law. The low-altitude law uses the same physical gimbal and roll actuators but is more robust when allowable gimbal authority tightens to 3°, 1.5°, and 0.75°. The GUI labels this scheduled mode `TERMINAL ACTIVE`; `FALLBACK ACTIVE` is reserved for genuine MPC warm-up or rejected solves.
 
 Engine cutoff occurs within 0.15 m of the landed body/leg reference height when horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, and vertical speed is between -0.50 and +0.15 m/s. MuJoCo then resolves the deliberately small residual motion through landing-leg contact and pad friction rather than holding the engine on for repeated terminal corrections.
 
@@ -334,7 +349,8 @@ auto-land takes over and the trigger latches for the flight. Reserve takeover us
 The GUI displays the controller that currently owns the actuators:
 
 - `MPC ACTIVE` after a valid SCvx result is accepted;
-- `FALLBACK ACTIVE` while automatic control is using the deterministic backup, including MPC warm-up or solver failure;
+- `TERMINAL ACTIVE` during the scheduled final-approach handoff;
+- `FALLBACK ACTIVE` during MPC warm-up or after a rejected solve;
 - `MANUAL TVC` when hover and auto-land are inactive.
 
 The phase logic is intentionally separate from the optimizer. It provides interpretable reference generation while the MPC handles coupled six-degree-of-freedom tracking and actuator constraints.

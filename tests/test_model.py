@@ -8,6 +8,7 @@ import pytest
 
 from rocket_landing.mpc import MPCResult, gimbal_direction_body
 from rocket_landing.sim import (
+  LandingPhase,
   MAX_ROLL_CONTROL_TORQUE_NM,
   ROCKET_DIAMETER_M,
   ROCKET_HEIGHT_M,
@@ -376,6 +377,11 @@ def test_controller_indicator_reports_manual_fallback_and_mpc_ownership() -> Non
   )
   label, _ = window._controller_indicator_style()
   assert label == "MPC ACTIVE"
+
+  window.simulation.landing_phase = LandingPhase.DESCEND
+  window.simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 5.0
+  label, _ = window._controller_indicator_style()
+  assert label == "TERMINAL ACTIVE"
 
 
 def test_short_key_events_trigger_mode_commands() -> None:

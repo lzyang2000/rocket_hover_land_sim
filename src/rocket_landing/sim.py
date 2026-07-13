@@ -45,6 +45,10 @@ ROLL_RCS_TIME_CONSTANT_S = 0.10
 GIMBAL_TIME_CONSTANT_S = 0.08
 TERMINAL_GIMBAL_TIME_CONSTANT_S = 0.20
 TERMINAL_GIMBAL_DEADBAND_RADIANS = math.radians(0.15)
+AUTOPILOT_GIMBAL_LIMIT_RADIANS = math.radians(6.0)
+LANDING_ALIGNMENT_HORIZONTAL_LEAD_M = 4.0
+LANDING_ALIGNMENT_VERTICAL_LEAD_M = 2.0
+MPC_TERMINAL_HANDOFF_HEIGHT_M = 7.0
 AUTO_LAND_FUEL_MARGIN = 1.05
 AUTO_LAND_FUEL_CHECK_PERIOD_S = 0.25
 AUTO_LAND_TAKEOVER_MIN_HEIGHT_M = 0.15
@@ -66,7 +70,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.3 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.4 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -135,9 +139,7 @@ class RocketSimulation:
       ),
       min_thrust_newtons=self.controller.limits.min_thrust_newtons,
       max_thrust_newtons=self.controller.limits.max_thrust_newtons,
-      max_gimbal_radians=math.radians(
-        self.controller.limits.pointing_half_angle_deg
-      ),
+      max_gimbal_radians=AUTOPILOT_GIMBAL_LIMIT_RADIANS,
       max_roll_torque_nm=MAX_ROLL_CONTROL_TORQUE_NM,
       minimum_com_height_m=(
         ROCKET_LANDED_COM_Z_M
@@ -145,6 +147,7 @@ class RocketSimulation:
         .center_of_mass_body_m[2]
         - 0.10
       ),
+      maximum_scaled_defect=0.20,
     )
     self.mpc = SixDofMPC(self._mpc_config) if enable_mpc else None
     self._mpc_executor = (
@@ -234,6 +237,14 @@ class RocketSimulation:
   def landing_active(self) -> bool:
     return self.landing_phase in (LandingPhase.ALIGN, LandingPhase.DESCEND)
 
+  @property
+  def terminal_controller_active(self) -> bool:
+    return (
+      self.landing_phase is LandingPhase.DESCEND
+      and float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+      <= MPC_TERMINAL_HANDOFF_HEIGHT_M
+    )
+
   def applied_mass_properties(self) -> MassProperties:
     """Return the mass properties currently installed in MuJoCo."""
 
@@ -320,9 +331,7 @@ class RocketSimulation:
       if fuel_takeover
       else max(current_altitude, landed_com_altitude + 12.0)
     )
-    self.hover_target_position = np.array(
-      [0.0, 0.0, self.landing_staging_altitude], dtype=float
-    )
+    self.hover_target_position = self.center_of_mass_position_world()
     self.hover_target_velocity[:] = 0.0
     self.hover_enabled = True
     self.landing_phase = LandingPhase.ALIGN
@@ -454,10 +463,20 @@ class RocketSimulation:
 
     if self.landing_phase is LandingPhase.ALIGN:
       self.hover_target_velocity[:] = 0.0
-      self.hover_target_position[:] = (
-        landed_com_position[0],
-        landed_com_position[1],
-        self.landing_staging_altitude,
+      horizontal_offset = landed_com_position[0:2] - position[0:2]
+      horizontal_distance = float(np.linalg.norm(horizontal_offset))
+      if horizontal_distance > LANDING_ALIGNMENT_HORIZONTAL_LEAD_M:
+        horizontal_offset *= (
+          LANDING_ALIGNMENT_HORIZONTAL_LEAD_M / horizontal_distance
+        )
+      self.hover_target_position[0:2] = position[0:2] + horizontal_offset
+      vertical_offset = float(self.landing_staging_altitude - position[2])
+      self.hover_target_position[2] = position[2] + float(
+        np.clip(
+          vertical_offset,
+          -LANDING_ALIGNMENT_VERTICAL_LEAD_M,
+          LANDING_ALIGNMENT_VERTICAL_LEAD_M,
+        )
       )
       aligned = (
         horizontal_error < 1.50
@@ -586,8 +605,18 @@ class RocketSimulation:
     state: np.ndarray,
     target: np.ndarray,
     previous_control: np.ndarray,
+    max_gimbal_radians: float,
   ) -> tuple[int, MPCResult]:
-    return generation, controller.solve(state, target, previous_control)
+    if isinstance(controller, SixDofMPC):
+      result = controller.solve(
+        state,
+        target,
+        previous_control,
+        max_gimbal_radians=max_gimbal_radians,
+      )
+    else:
+      result = controller.solve(state, target, previous_control)
+    return generation, result
 
   def _set_lateral_indicator_from_world_direction(
     self, direction_world: np.ndarray
@@ -598,7 +627,7 @@ class RocketSimulation:
     if horizontal_magnitude < 1e-9:
       self.controller.center_lateral()
       return
-    max_angle = math.radians(self.controller.limits.pointing_half_angle_deg)
+    max_angle = self._active_gimbal_limit_radians()
     angle = math.atan2(horizontal_magnitude, max(float(direction[2]), 1e-9))
     self.controller.lateral_command[:] = (
       horizontal
@@ -620,7 +649,7 @@ class RocketSimulation:
       )
     )
     gimbal = np.asarray(command[GIMBAL], dtype=float).copy()
-    max_gimbal = math.radians(self.controller.limits.pointing_half_angle_deg)
+    max_gimbal = self._active_gimbal_limit_radians()
     magnitude = float(np.linalg.norm(gimbal))
     if magnitude > max_gimbal:
       gimbal *= max_gimbal / magnitude
@@ -668,9 +697,19 @@ class RocketSimulation:
     state = self._mpc_state()
     target = self._mpc_target_state()
     previous = self._current_actuator_control()
+    max_gimbal_radians = self._active_gimbal_limit_radians()
     self.last_mpc_request_time = float(self.data.time)
     if self._mpc_executor is None:
-      self._apply_mpc_result(self.mpc.solve(state, target, previous))
+      if isinstance(self.mpc, SixDofMPC):
+        result = self.mpc.solve(
+          state,
+          target,
+          previous,
+          max_gimbal_radians=max_gimbal_radians,
+        )
+      else:
+        result = self.mpc.solve(state, target, previous)
+      self._apply_mpc_result(result)
       return
     self._mpc_future = self._mpc_executor.submit(
       self._solve_mpc_job,
@@ -679,6 +718,7 @@ class RocketSimulation:
       state,
       target,
       previous,
+      max_gimbal_radians,
     )
 
   def _update_hover_controller(self, *, force: bool = False) -> None:
@@ -688,6 +728,11 @@ class RocketSimulation:
       self.disable_hover()
       return
     self._poll_mpc_result()
+    if self.terminal_controller_active:
+      self.mpc_using_fallback = True
+      self._fallback_hover_guidance()
+      self._allocate_attitude_control(self.controller.thrust_direction_world())
+      return
     due = (
       force
       or self.data.time - self.last_mpc_request_time >= MPC_UPDATE_PERIOD_S
@@ -750,7 +795,7 @@ class RocketSimulation:
       [-desired_torque[1] / lever_arm, desired_torque[0] / lever_arm],
       dtype=float,
     )
-    max_angle = math.radians(self.controller.limits.pointing_half_angle_deg)
+    max_angle = self._active_gimbal_limit_radians()
     max_lateral_force = thrust * math.sin(max_angle)
     requested_magnitude = float(np.linalg.norm(requested_lateral_force))
     if requested_magnitude > max_lateral_force > 0.0:
@@ -771,12 +816,15 @@ class RocketSimulation:
       )
     )
 
-  def _terminal_gimbal_limit_radians(self) -> float:
+  def _active_gimbal_limit_radians(self) -> float:
     mechanical_limit = math.radians(
       self.controller.limits.pointing_half_angle_deg
     )
-    if self.landing_phase is not LandingPhase.DESCEND:
+    if not self.hover_enabled:
       return mechanical_limit
+    autopilot_limit = min(mechanical_limit, AUTOPILOT_GIMBAL_LIMIT_RADIANS)
+    if self.landing_phase is not LandingPhase.DESCEND:
+      return autopilot_limit
     height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
     if height <= 1.0:
       return math.radians(0.75)
@@ -784,7 +832,7 @@ class RocketSimulation:
       return math.radians(1.5)
     if height <= 5.0:
       return math.radians(3.0)
-    return mechanical_limit
+    return autopilot_limit
 
   @staticmethod
   def _limit_vector_magnitude(vector: np.ndarray, limit: float) -> np.ndarray:
@@ -802,7 +850,7 @@ class RocketSimulation:
       if self.controller.engine_state is EngineState.LIT
       else np.zeros(2, dtype=float)
     )
-    limit = self._terminal_gimbal_limit_radians()
+    limit = self._active_gimbal_limit_radians()
     target = self._limit_vector_magnitude(target, limit)
     terminal = (
       self.landing_phase is LandingPhase.DESCEND
@@ -1034,7 +1082,9 @@ class RocketSimulation:
       math.acos(float(np.clip(rotation[2, 2], -1.0, 1.0)))
     )
     gimbal_angle = math.degrees(float(np.linalg.norm(self.engine_gimbal_radians)))
-    if self.hover_enabled and self.enable_mpc:
+    if self.hover_enabled and self.terminal_controller_active:
+      control_line = "CTRL 6-DOF TERMINAL"
+    elif self.hover_enabled and self.enable_mpc:
       if self.mpc_using_fallback:
         control_line = "CTRL 6-DOF FALLBACK"
       elif self.last_mpc_result is None:
@@ -1168,6 +1218,8 @@ class RocketWindow:
   ) -> tuple[str, tuple[float, float, float, float]]:
     simulation = self.simulation
     if simulation.hover_enabled:
+      if simulation.terminal_controller_active:
+        return "TERMINAL ACTIVE", (0.20, 0.32, 0.68, 0.96)
       if (
         simulation.enable_mpc
         and not simulation.mpc_using_fallback

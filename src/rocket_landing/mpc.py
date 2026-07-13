@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import time
+import warnings
 
 import cvxpy as cp
 import numpy as np
@@ -327,7 +328,7 @@ class SixDofMPC:
     return state_matrix, control_matrix, offset
 
   def _initial_guess(
-    self, initial_state: np.ndarray, target_state: np.ndarray
+    self, initial_state: np.ndarray, target_states: np.ndarray
   ) -> tuple[np.ndarray, np.ndarray]:
     steps = self.config.horizon_steps
     states = np.zeros((NX, steps + 1), dtype=float)
@@ -341,7 +342,10 @@ class SixDofMPC:
     )
     for index in range(steps + 1):
       fraction = index / steps
-      states[:, index] = (1.0 - fraction) * initial_state + fraction * target_state
+      states[:, index] = (
+        (1.0 - fraction) * initial_state
+        + fraction * target_states[:, index]
+      )
       states[MASS, index] = max(
         initial_state[MASS]
         - self.config.alpha_kg_per_newton_second
@@ -351,21 +355,38 @@ class SixDofMPC:
         self.config.dry_mass_kg,
       )
       states[QUATERNION, index] = quaternion_slerp(
-        initial_state[QUATERNION], target_state[QUATERNION], fraction
+        initial_state[QUATERNION], target_states[QUATERNION, index], fraction
       )
     controls[THRUST, :] = hover_thrust
     return states, controls
 
   def _shift_warm_start(
-    self, initial_state: np.ndarray, target_state: np.ndarray
+    self, initial_state: np.ndarray, target_states: np.ndarray
   ) -> tuple[np.ndarray, np.ndarray]:
     if self._nominal_states is None or self._nominal_controls is None:
-      return self._initial_guess(initial_state, target_state)
+      return self._initial_guess(initial_state, target_states)
     controls = np.column_stack(
       (self._nominal_controls[:, 1:], self._nominal_controls[:, -1])
     )
     states = self.rollout(initial_state, controls)
     return states, controls
+
+  def _reference_trajectory(self, target_state: np.ndarray) -> np.ndarray:
+    """Advance a moving target consistently across the prediction horizon."""
+
+    target = np.asarray(target_state, dtype=float)
+    references = np.repeat(
+      target[:, None], self.config.horizon_steps + 1, axis=1
+    )
+    for index in range(self.config.horizon_steps + 1):
+      elapsed = index * self.config.prediction_dt
+      references[POSITION, index] = (
+        target[POSITION] + elapsed * target[VELOCITY]
+      )
+      if references[POSITION.stop - 1, index] < self.config.minimum_com_height_m:
+        references[POSITION.stop - 1, index] = self.config.minimum_com_height_m
+        references[VELOCITY.stop - 1, index] = 0.0
+    return references
 
   def rollout(self, initial_state: np.ndarray, controls: np.ndarray) -> np.ndarray:
     states = np.zeros((NX, controls.shape[1] + 1), dtype=float)
@@ -383,8 +404,9 @@ class SixDofMPC:
     self._u = cp.Variable((NU, steps))
     self._virtual = cp.Variable((NX, steps))
     self._initial = cp.Parameter(NX)
-    self._target = cp.Parameter(NX)
+    self._target = cp.Parameter((NX, steps + 1))
     self._previous_control = cp.Parameter(NU)
+    self._gimbal_limit = cp.Parameter(nonneg=True)
     self._nominal_x_parameter = cp.Parameter((NX, steps + 1))
     self._nominal_u_parameter = cp.Parameter((NU, steps))
     self._a_parameters = [cp.Parameter((NX, NX)) for _ in range(steps)]
@@ -446,14 +468,14 @@ class SixDofMPC:
           self._u[THRUST, index] >= self.config.min_thrust_newtons,
           self._u[THRUST, index] <= self.config.max_thrust_newtons,
           cp.norm(self._u[GIMBAL, index], 2)
-          <= self.config.max_gimbal_radians,
+          <= self._gimbal_limit,
           cp.abs(self._u[ROLL_TORQUE, index])
           <= self.config.max_roll_torque_nm,
         ]
       )
       scaled_error = cp.multiply(
         running_weights / self._state_scale,
-        self._x[:, index] - self._target,
+        self._x[:, index] - self._target[:, index],
       )
       objective += cp.sum_squares(scaled_error)
       objective += 0.00001 * self._u[THRUST, index] / self.config.max_thrust_newtons
@@ -499,7 +521,7 @@ class SixDofMPC:
 
     terminal_error = cp.multiply(
       terminal_weights / self._state_scale,
-      self._x[:, steps] - self._target,
+      self._x[:, steps] - self._target[:, steps],
     )
     objective += cp.sum_squares(terminal_error)
     self._problem = cp.Problem(cp.Minimize(objective), constraints)
@@ -509,6 +531,7 @@ class SixDofMPC:
     initial_state: np.ndarray,
     target_state: np.ndarray,
     previous_control: np.ndarray | None = None,
+    max_gimbal_radians: float | None = None,
   ) -> MPCResult:
     """Solve successive convex subproblems and return the first command."""
 
@@ -517,6 +540,15 @@ class SixDofMPC:
     target = np.asarray(target_state, dtype=float).copy()
     initial[QUATERNION] = normalize_quaternion(initial[QUATERNION])
     target[QUATERNION] = normalize_quaternion(target[QUATERNION])
+    target_states = self._reference_trajectory(target)
+    gimbal_limit = min(
+      self.config.max_gimbal_radians,
+      (
+        self.config.max_gimbal_radians
+        if max_gimbal_radians is None
+        else max(float(max_gimbal_radians), 0.0)
+      ),
+    )
     if previous_control is None:
       previous = np.array(
         [
@@ -533,7 +565,17 @@ class SixDofMPC:
       )
     else:
       previous = np.asarray(previous_control, dtype=float).copy()
-    nominal_states, nominal_controls = self._shift_warm_start(initial, target)
+    previous_gimbal_norm = float(np.linalg.norm(previous[GIMBAL]))
+    if previous_gimbal_norm > gimbal_limit > 0.0:
+      previous[GIMBAL] *= gimbal_limit / previous_gimbal_norm
+    nominal_states, nominal_controls = self._shift_warm_start(
+      initial, target_states
+    )
+    for node in range(self.config.horizon_steps):
+      nominal_gimbal_norm = float(np.linalg.norm(nominal_controls[GIMBAL, node]))
+      if nominal_gimbal_norm > gimbal_limit > 0.0:
+        nominal_controls[GIMBAL, node] *= gimbal_limit / nominal_gimbal_norm
+    nominal_states = self.rollout(initial, nominal_controls)
     status = "not_solved"
     solution_states = nominal_states
     solution_controls = nominal_controls
@@ -550,8 +592,9 @@ class SixDofMPC:
           self._b_parameters[node].value = matrix_b
           self._c_parameters[node].value = offset
         self._initial.value = initial
-        self._target.value = target
+        self._target.value = target_states
         self._previous_control.value = previous
+        self._gimbal_limit.value = gimbal_limit
         self._nominal_x_parameter.value = nominal_states
         self._nominal_u_parameter.value = nominal_controls
         self._x.value = nominal_states
@@ -559,14 +602,20 @@ class SixDofMPC:
         self._virtual.value = np.zeros(
           (NX, self.config.horizon_steps), dtype=float
         )
-        self._problem.solve(
-          solver=cp.CLARABEL,
-          warm_start=True,
-          verbose=False,
-          tol_gap_abs=1e-5,
-          tol_feas=1e-5,
-          max_iter=100,
-        )
+        with warnings.catch_warnings():
+          warnings.filterwarnings(
+            "ignore",
+            message="Solution may be inaccurate.*",
+            category=UserWarning,
+          )
+          self._problem.solve(
+            solver=cp.CLARABEL,
+            warm_start=True,
+            verbose=False,
+            tol_gap_abs=1e-5,
+            tol_feas=1e-5,
+            max_iter=100,
+          )
         status = str(self._problem.status)
         if status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
           break
