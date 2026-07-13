@@ -235,6 +235,15 @@ def test_high_altitude_align_uses_a_wider_descent_capture_corridor() -> None:
   assert simulation.descent_capture_radius_for_height_m(35.0) == pytest.approx(
     4.55
   )
+  assert simulation.landing_horizontal_lead_for_height_m(18.0) == pytest.approx(
+    4.0
+  )
+  assert simulation.landing_horizontal_lead_for_height_m(35.0) == pytest.approx(
+    6.55
+  )
+  assert simulation.landing_horizontal_lead_for_height_m(80.0) == pytest.approx(
+    8.0
+  )
   assert simulation.landing_phase is LandingPhase.DESCEND
 
 
@@ -256,7 +265,7 @@ def test_descent_keeps_horizontal_target_inside_bounded_lead() -> None:
   simulation._update_landing_guidance()
 
   target_offset = simulation.hover_target_position[0:2] - position[0:2]
-  assert np.linalg.norm(target_offset) == pytest.approx(4.0)
+  assert np.linalg.norm(target_offset) == pytest.approx(6.55)
   assert abs(float(simulation.hover_target_position[0])) < abs(float(position[0]))
 
 

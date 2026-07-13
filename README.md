@@ -86,7 +86,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.11`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.12`.
 
 ## Controls
 
@@ -162,7 +162,7 @@ Synchronous mode can pause rendering and input briefly during a solve—typicall
 
 Press `L` or click `AUTO LAND`.
 
-The state machine supplies moving position and velocity references to the 6-DOF MPC. During ALIGN, the reference is limited to a four-metre horizontal and two-metre vertical lead ahead of the measured rocket instead of jumping directly to the pad. The descent-capture radius stays at 2 m through 18 m altitude, then grows by 0.15 m per additional metre and is capped at 8 m. Descent starts inside that altitude-aware corridor once horizontal speed is below 1.0 m/s and staging-altitude error and vertical speed are below 2 m and 1.5 m/s. Lateral alignment continues throughout descent using the same bounded four-metre lead, so a high rocket can descend while converging without receiving a sudden pad-center target. It then uses an aggressive approach with terminal braking:
+The state machine supplies moving position and velocity references to the 6-DOF MPC. At 18 m altitude and below, ALIGN uses a four-metre horizontal and two-metre vertical lead instead of jumping directly to the pad. Above 18 m, the horizontal lead grows by 0.15 m per additional metre, capped at 8 m, so high-altitude lateral capture uses more of the available authority without changing the low-altitude controller. The descent-capture radius separately stays at 2 m through 18 m, then grows by 0.15 m per additional metre and is capped at 8 m. Descent starts inside that altitude-aware corridor once horizontal speed is below 1.0 m/s and staging-altitude error and vertical speed are below 2 m and 1.5 m/s. Lateral alignment continues throughout descent using the same altitude-scheduled bounded lead, avoiding a sudden pad-center target. It then uses an aggressive approach with terminal braking:
 
 - 12 m/s above 30 m;
 - 8 m/s from 18 to 30 m;

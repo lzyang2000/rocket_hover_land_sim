@@ -51,6 +51,8 @@ LANDING_GIMBAL_LIMIT_RADIANS = math.radians(6.0)
 HOVER_TARGET_HORIZONTAL_LEAD_M = 2.5
 HOVER_TARGET_VERTICAL_LEAD_M = 2.0
 LANDING_ALIGNMENT_HORIZONTAL_LEAD_M = 4.0
+LANDING_ALIGNMENT_MAX_HORIZONTAL_LEAD_M = 8.0
+LANDING_ALIGNMENT_LEAD_PER_HEIGHT = 0.15
 LANDING_ALIGNMENT_VERTICAL_LEAD_M = 2.0
 LANDING_DESCENT_CAPTURE_BASE_RADIUS_M = 2.0
 LANDING_DESCENT_CAPTURE_REFERENCE_HEIGHT_M = 18.0
@@ -97,7 +99,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.11 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.12 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -444,15 +446,30 @@ class RocketSimulation:
     return min(expanded_radius, LANDING_DESCENT_CAPTURE_MAX_RADIUS_M)
 
   @staticmethod
+  def landing_horizontal_lead_for_height_m(height_m: float) -> float:
+    """Increase lateral target lead only where altitude leaves braking time."""
+
+    expanded_lead = (
+      LANDING_ALIGNMENT_HORIZONTAL_LEAD_M
+      + LANDING_ALIGNMENT_LEAD_PER_HEIGHT
+      * max(
+        float(height_m) - LANDING_DESCENT_CAPTURE_REFERENCE_HEIGHT_M,
+        0.0,
+      )
+    )
+    return min(expanded_lead, LANDING_ALIGNMENT_MAX_HORIZONTAL_LEAD_M)
+
+  @staticmethod
   def _bounded_landing_horizontal_target(
     position: np.ndarray,
     landed_position: np.ndarray,
+    maximum_lead_m: float,
   ) -> np.ndarray:
     horizontal_offset = landed_position[0:2] - position[0:2]
     horizontal_distance = float(np.linalg.norm(horizontal_offset))
-    if horizontal_distance > LANDING_ALIGNMENT_HORIZONTAL_LEAD_M:
+    if horizontal_distance > maximum_lead_m:
       horizontal_offset *= (
-        LANDING_ALIGNMENT_HORIZONTAL_LEAD_M / horizontal_distance
+        maximum_lead_m / horizontal_distance
       )
     return position[0:2] + horizontal_offset
 
@@ -544,12 +561,14 @@ class RocketSimulation:
     horizontal_error = float(np.linalg.norm(position[0:2]))
     horizontal_speed = float(np.linalg.norm(velocity[0:2]))
     height = max(float(body_position[2] - LANDING_PAD_POSITION[2]), 0.0)
+    horizontal_lead = self.landing_horizontal_lead_for_height_m(height)
 
     if self.landing_phase is LandingPhase.ALIGN:
       self.hover_target_velocity[:] = 0.0
       self.hover_target_position[0:2] = self._bounded_landing_horizontal_target(
         position,
         landed_com_position,
+        horizontal_lead,
       )
       vertical_offset = float(self.landing_staging_altitude - position[2])
       self.hover_target_position[2] = position[2] + float(
@@ -575,6 +594,7 @@ class RocketSimulation:
       self.hover_target_position[0:2] = self._bounded_landing_horizontal_target(
         position,
         landed_com_position,
+        horizontal_lead,
       )
       previous_target_z = float(self.hover_target_position[2])
       requested_rate = self._descent_rate_mps()
