@@ -1,0 +1,185 @@
+import glfw
+import mujoco
+import numpy as np
+import pytest
+
+from rocket_landing.sim import (
+  ROCKET_DIAMETER_M,
+  ROCKET_HEIGHT_M,
+  ROCKET_LANDED_COM_Z_M,
+  RocketSimulation,
+  RocketWindow,
+  model_path,
+)
+
+
+def test_mjcf_compiles_and_contains_free_rocket() -> None:
+  model = mujoco.MjModel.from_xml_path(str(model_path()))
+  rocket_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "rocket")
+  assert rocket_id > 0
+  assert model.nq == 7
+  assert model.nv == 6
+
+
+def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
+  simulation = RocketSimulation()
+  fuselage_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "fuselage"
+  )
+  foot_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "foot_xp"
+  )
+
+  assert 2.0 * simulation.model.geom_size[fuselage_id, 0] == pytest.approx(
+    ROCKET_DIAMETER_M
+  )
+  assert ROCKET_HEIGHT_M / ROCKET_DIAMETER_M == pytest.approx(11.26, rel=0.01)
+  assert simulation.data.qpos[2] == pytest.approx(ROCKET_LANDED_COM_Z_M)
+  assert simulation.model.geom_pos[foot_id, 0] == pytest.approx(8.50)
+
+
+def test_headless_rollout_lifts_with_vertical_thrust() -> None:
+  simulation = RocketSimulation()
+  initial_altitude = float(simulation.data.qpos[2])
+  simulation.controller.ignite()
+  simulation.controller.throttle = 0.60
+  altitude_changes = []
+  previous_altitude = initial_altitude
+  for _ in range(800):
+    simulation.step()
+    altitude = float(simulation.data.qpos[2])
+    altitude_changes.append(altitude - previous_altitude)
+    previous_altitude = altitude
+  assert simulation.data.qpos[2] > initial_altitude + 20.0
+  assert min(altitude_changes) > -0.05
+
+
+def test_kill_button_hitbox_matches_drawn_rectangle() -> None:
+  x, y, width, height = RocketWindow._engine_button_rect_window(1280)
+  assert RocketWindow._point_in_engine_button(x + width / 2, y + height / 2, 1280)
+  assert not RocketWindow._point_in_engine_button(x - 1, y + height / 2, 1280)
+  assert not RocketWindow._point_in_engine_button(
+    x + width / 2, y + height + 1, 1280
+  )
+
+  hover_x, hover_y, hover_width, hover_height = (
+    RocketWindow._hover_button_rect_window(1280)
+  )
+  assert RocketWindow._point_in_hover_button(
+    hover_x + hover_width / 2, hover_y + hover_height / 2, 1280
+  )
+
+  land_x, land_y, land_width, land_height = RocketWindow._land_button_rect_window(
+    1280
+  )
+  assert RocketWindow._point_in_land_button(
+    land_x + land_width / 2, land_y + land_height / 2, 1280
+  )
+
+  direction_rects = RocketWindow._direction_button_rects_window(1280)
+  for direction, (button_x, button_y, button_width, button_height) in (
+    direction_rects.items()
+  ):
+    command = RocketWindow._direction_command_for_point(
+      button_x + button_width / 2,
+      button_y + button_height / 2,
+      1280,
+    )
+    assert command is not None, direction
+
+  slider_x, slider_y, slider_width, slider_height = (
+    RocketWindow._thrust_slider_rect_window(1280)
+  )
+  assert RocketWindow._point_in_thrust_slider(
+    slider_x + slider_width / 2,
+    slider_y + slider_height / 2,
+    1280,
+  )
+
+
+def test_engine_off_rocket_settles_without_attitude_controller_vibration() -> None:
+  simulation = RocketSimulation()
+  vertical_speeds = []
+  for _ in range(1600):
+    simulation.step()
+    vertical_speeds.append(abs(float(simulation.data.qvel[2])))
+  assert max(vertical_speeds[-200:]) < 0.03
+
+
+def test_gui_actions_ignite_kill_and_reset_without_a_gl_context() -> None:
+  window = RocketWindow.__new__(RocketWindow)
+  window.simulation = RocketSimulation()
+  window.status_message = ""
+  window.status_until = 0.0
+
+  window._apply_throttle_input(1.0, 0.1)
+  assert window.simulation.controller.engine_state.name == "LIT"
+  assert window.simulation.controller.throttle > 0.20
+
+  window._kill_engine()
+  assert window.simulation.controller.engine_state.name == "SHUTDOWN"
+  assert window.simulation.controller.thrust_magnitude_newtons() == 0.0
+
+  window._reset_flight()
+  assert window.simulation.controller.engine_state.name == "OFF"
+  assert window.simulation.controller.fuel_mass_kg == (
+    window.simulation.controller.initial_fuel_mass_kg
+  )
+
+
+def test_gui_thrust_slider_maps_limits_and_becomes_read_only_in_hover() -> None:
+  window = RocketWindow.__new__(RocketWindow)
+  window.simulation = RocketSimulation()
+  window.status_message = ""
+  window.status_until = 0.0
+  slider_x, _, slider_width, _ = window._thrust_slider_rect_window(1280)
+
+  assert window._throttle_from_slider_x(slider_x, 1280) == pytest.approx(0.20)
+  assert window._throttle_from_slider_x(
+    slider_x + slider_width, 1280
+  ) == pytest.approx(0.80)
+  assert window._set_manual_throttle_from_slider(
+    slider_x + slider_width / 2, 1280
+  )
+  assert window.simulation.controller.engine_state.name == "LIT"
+  assert window.simulation.controller.throttle == pytest.approx(0.50)
+
+  assert window.simulation.enable_hover()
+  autopilot_throttle = window.simulation.controller.throttle
+  assert not window._set_manual_throttle_from_slider(
+    slider_x + slider_width, 1280
+  )
+  assert window.simulation.controller.throttle == pytest.approx(
+    autopilot_throttle
+  )
+
+
+def test_direction_indicator_levels_match_gimbal_command() -> None:
+  levels = RocketWindow._direction_button_levels(np.array([0.4, -0.7]))
+  assert levels == {"W": 0.0, "A": 0.0, "S": 0.7, "D": 0.4}
+
+
+def test_short_key_events_trigger_mode_commands() -> None:
+  window = RocketWindow.__new__(RocketWindow)
+  window.simulation = RocketSimulation()
+  window.status_message = ""
+  window.status_until = 0.0
+  window.previous_command_keys = {
+    glfw.KEY_H: False,
+    glfw.KEY_I: False,
+    glfw.KEY_K: False,
+    glfw.KEY_L: False,
+    glfw.KEY_R: False,
+  }
+
+  window._on_key(None, glfw.KEY_H, 0, glfw.PRESS, 0)
+  assert window.simulation.hover_enabled
+  assert window.simulation.controller.engine_state.name == "LIT"
+  window._on_key(None, glfw.KEY_H, 0, glfw.RELEASE, 0)
+
+  window._on_key(None, glfw.KEY_K, 0, glfw.PRESS, 0)
+  assert window.simulation.controller.engine_state.name == "SHUTDOWN"
+  window._on_key(None, glfw.KEY_K, 0, glfw.RELEASE, 0)
+
+  window._on_key(None, glfw.KEY_R, 0, glfw.PRESS, 0)
+  assert window.simulation.controller.engine_state.name == "OFF"

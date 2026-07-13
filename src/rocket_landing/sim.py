@@ -1,0 +1,1023 @@
+"""Interactive MuJoCo rocket simulation with a native clickable control panel."""
+
+from __future__ import annotations
+
+import argparse
+from enum import Enum, auto
+import math
+from pathlib import Path
+import time
+
+import glfw
+import mujoco
+import numpy as np
+
+from rocket_landing.controller import EngineState, RocketController
+
+
+THROTTLE_RATE_PER_SECOND = 0.12
+LATERAL_SLEW_RATE_PER_SECOND = 1.6
+ATTITUDE_KP = 150_000_000.0
+ATTITUDE_KD = 55_000_000.0
+MAX_ASSIST_TORQUE_NM = 80_000_000.0
+MASS_UPDATE_PERIOD_S = 0.50
+HOVER_POSITION_KP = np.array([0.45, 0.45, 0.80])
+HOVER_VELOCITY_KD = np.array([1.20, 1.20, 1.80])
+HOVER_TARGET_SPEED_MPS = 2.0
+ROCKET_HEIGHT_M = 41.2
+ROCKET_DIAMETER_M = 3.66
+ROCKET_LANDED_COM_Z_M = 20.76
+LANDING_PAD_POSITION = np.array([0.0, 0.0, ROCKET_LANDED_COM_Z_M])
+LANDING_STAGING_MIN_ALTITUDE_M = ROCKET_LANDED_COM_Z_M + 12.0
+FLAME_ORIGIN_BODY_Z_M = -20.10
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 820
+APP_TITLE = "MuJoCo Powered Descent Lab v0.7 - Falcon 9 proportions"
+
+
+class LandingPhase(Enum):
+  INACTIVE = auto()
+  ALIGN = auto()
+  DESCEND = auto()
+  COMPLETE = auto()
+  ABORTED = auto()
+
+
+def model_path() -> Path:
+  return Path(__file__).with_name("assets") / "rocket.xml"
+
+
+class RocketSimulation:
+  """MuJoCo plant plus the paper-inspired constrained thrust controller."""
+
+  def __init__(self) -> None:
+    self.model = mujoco.MjModel.from_xml_path(str(model_path()))
+    self.data = mujoco.MjData(self.model)
+    self.controller = RocketController()
+    self.rocket_body_id = mujoco.mj_name2id(
+      self.model, mujoco.mjtObj.mjOBJ_BODY, "rocket"
+    )
+    self.flame_geom_id = mujoco.mj_name2id(
+      self.model, mujoco.mjtObj.mjOBJ_GEOM, "engine_flame"
+    )
+    self.initial_body_inertia = self.model.body_inertia[
+      self.rocket_body_id
+    ].copy()
+    self.last_mass_update_time = -math.inf
+    self.last_applied_mass = math.nan
+    self.hover_enabled = False
+    self.hover_target_position = np.zeros(3, dtype=float)
+    self.landing_phase = LandingPhase.INACTIVE
+    self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.reset()
+
+  def reset(self) -> None:
+    self.controller.reset()
+    mujoco.mj_resetData(self.model, self.data)
+    self.hover_enabled = False
+    self.hover_target_position = self.data.qpos[0:3].copy()
+    self.landing_phase = LandingPhase.INACTIVE
+    self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.last_mass_update_time = -math.inf
+    self.last_applied_mass = math.nan
+    self._update_model_mass(force=True)
+    self._update_flame()
+    mujoco.mj_forward(self.model, self.data)
+
+  def enable_hover(self) -> bool:
+    if self.controller.engine_state is EngineState.OFF:
+      self.controller.ignite()
+    if self.controller.engine_state is not EngineState.LIT:
+      return False
+    self.hover_target_position = self.data.qpos[0:3].copy()
+    self.hover_enabled = True
+    self.landing_phase = LandingPhase.INACTIVE
+    self._update_hover_controller()
+    return True
+
+  def disable_hover(self) -> None:
+    self.hover_enabled = False
+    self.controller.center_lateral()
+    if self.landing_phase not in (LandingPhase.COMPLETE, LandingPhase.ABORTED):
+      self.landing_phase = LandingPhase.INACTIVE
+
+  @property
+  def landing_active(self) -> bool:
+    return self.landing_phase in (LandingPhase.ALIGN, LandingPhase.DESCEND)
+
+  def start_landing(self) -> bool:
+    if self.controller.engine_state is EngineState.OFF:
+      self.controller.ignite()
+    if self.controller.engine_state is not EngineState.LIT:
+      return False
+
+    current_altitude = float(self.data.qpos[2])
+    self.landing_staging_altitude = max(
+      current_altitude, LANDING_STAGING_MIN_ALTITUDE_M
+    )
+    self.hover_target_position = np.array(
+      [0.0, 0.0, self.landing_staging_altitude], dtype=float
+    )
+    self.hover_enabled = True
+    self.landing_phase = LandingPhase.ALIGN
+    self._update_hover_controller()
+    return True
+
+  def cancel_landing(self) -> None:
+    if self.landing_active:
+      self.landing_phase = LandingPhase.INACTIVE
+      self.hover_target_position = self.data.qpos[0:3].copy()
+      self.hover_enabled = True
+
+  def _descent_rate_mps(self) -> float:
+    height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+    if height > 10.0:
+      return 2.0
+    if height > 3.0:
+      return 1.0
+    return 0.35
+
+  def _update_landing_guidance(self) -> None:
+    if not self.landing_active:
+      return
+    if self.controller.engine_state is not EngineState.LIT:
+      self.hover_enabled = False
+      self.landing_phase = LandingPhase.ABORTED
+      return
+
+    position = self.data.qpos[0:3]
+    velocity = self.data.qvel[0:3]
+    horizontal_error = float(np.linalg.norm(position[0:2]))
+    horizontal_speed = float(np.linalg.norm(velocity[0:2]))
+
+    if self.landing_phase is LandingPhase.ALIGN:
+      self.hover_target_position[:] = (
+        LANDING_PAD_POSITION[0],
+        LANDING_PAD_POSITION[1],
+        self.landing_staging_altitude,
+      )
+      aligned = (
+        horizontal_error < 0.30
+        and horizontal_speed < 0.20
+        and abs(position[2] - self.landing_staging_altitude) < 0.30
+        and abs(velocity[2]) < 0.25
+      )
+      if aligned:
+        self.landing_phase = LandingPhase.DESCEND
+
+    if self.landing_phase is LandingPhase.DESCEND:
+      self.hover_target_position[0:2] = LANDING_PAD_POSITION[0:2]
+      self.hover_target_position[2] = max(
+        LANDING_PAD_POSITION[2],
+        self.hover_target_position[2]
+        - self._descent_rate_mps() * self.model.opt.timestep,
+      )
+      height = float(position[2] - LANDING_PAD_POSITION[2])
+      ready_for_cutoff = (
+        height < 0.10
+        and -0.35 <= velocity[2] <= 0.10
+        and horizontal_error < 0.20
+        and horizontal_speed < 0.15
+      )
+      if ready_for_cutoff:
+        self.controller.kill_engine()
+        self.hover_enabled = False
+        self.controller.center_lateral()
+        self.landing_phase = LandingPhase.COMPLETE
+
+  def move_hover_target(self, delta_world: np.ndarray) -> None:
+    if self.hover_enabled:
+      self.hover_target_position += np.asarray(delta_world, dtype=float)
+
+  def _update_hover_controller(self) -> None:
+    if not self.hover_enabled:
+      return
+    if self.controller.engine_state is not EngineState.LIT:
+      self.disable_hover()
+      return
+
+    position = self.data.qpos[0:3]
+    velocity = self.data.qvel[0:3]
+    position_error = self.hover_target_position - position
+    desired_acceleration = (
+      HOVER_POSITION_KP * position_error - HOVER_VELOCITY_KD * velocity
+    )
+    required_force = self.controller.wet_mass_kg * (
+      desired_acceleration - self.model.opt.gravity
+    )
+
+    vertical_force = float(required_force[2])
+    horizontal_force = required_force[0:2]
+    horizontal_magnitude = float(np.linalg.norm(horizontal_force))
+    max_angle = math.radians(self.controller.limits.pointing_half_angle_deg)
+
+    if vertical_force <= 0.0:
+      self.controller.center_lateral()
+      required_magnitude = 0.0
+    else:
+      requested_angle = math.atan2(horizontal_magnitude, vertical_force)
+      constrained_angle = min(requested_angle, max_angle)
+      if horizontal_magnitude > 0.0 and max_angle > 0.0:
+        self.controller.lateral_command[:] = (
+          horizontal_force
+          / horizontal_magnitude
+          * (constrained_angle / max_angle)
+        )
+      else:
+        self.controller.center_lateral()
+      required_magnitude = vertical_force / max(math.cos(constrained_angle), 1e-6)
+
+    self.controller.throttle = float(
+      np.clip(
+        required_magnitude / self.controller.limits.nominal_max_newtons,
+        self.controller.limits.min_throttle,
+        self.controller.limits.max_throttle,
+      )
+    )
+
+  def _attitude_assist_torque(self, desired_up: np.ndarray) -> np.ndarray:
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    body_up = rotation[:, 2]
+    angular_velocity_world = self.data.cvel[self.rocket_body_id, 0:3]
+    attitude_error = np.cross(body_up, desired_up)
+    torque = ATTITUDE_KP * attitude_error - ATTITUDE_KD * angular_velocity_world
+    magnitude = float(np.linalg.norm(torque))
+    if magnitude > MAX_ASSIST_TORQUE_NM:
+      torque *= MAX_ASSIST_TORQUE_NM / magnitude
+    return torque
+
+  def _apply_control(self) -> None:
+    thrust_direction = self.controller.thrust_direction_world()
+    self.data.xfrc_applied[self.rocket_body_id, :] = 0.0
+    self.data.xfrc_applied[self.rocket_body_id, 0:3] = (
+      self.controller.thrust_vector_world()
+    )
+    if self.controller.engine_state is EngineState.LIT:
+      self.data.xfrc_applied[self.rocket_body_id, 3:6] = (
+        self._attitude_assist_torque(thrust_direction)
+      )
+
+  def _update_model_mass(self, *, force: bool = False) -> None:
+    current_mass = self.controller.wet_mass_kg
+    if not force and math.isclose(current_mass, self.last_applied_mass, abs_tol=1e-9):
+      return
+    if (
+      not force
+      and self.data.time - self.last_mass_update_time < MASS_UPDATE_PERIOD_S
+    ):
+      return
+
+    initial_wet_mass = (
+      self.controller.dry_mass_kg + self.controller.initial_fuel_mass_kg
+    )
+    mass_ratio = current_mass / initial_wet_mass
+    self.model.body_mass[self.rocket_body_id] = current_mass
+    self.model.body_inertia[self.rocket_body_id] = (
+      self.initial_body_inertia * mass_ratio
+    )
+
+    # mj_setConst temporarily evaluates the model at qpos0 and leaves MjData
+    # there. Preserve the live free-body state so a mass update cannot teleport
+    # the rocket back to its initial pose.
+    qpos = self.data.qpos.copy()
+    qvel = self.data.qvel.copy()
+    simulation_time = float(self.data.time)
+    mujoco.mj_setConst(self.model, self.data)
+    self.data.qpos[:] = qpos
+    self.data.qvel[:] = qvel
+    self.data.time = simulation_time
+    mujoco.mj_forward(self.model, self.data)
+    self.last_mass_update_time = self.data.time
+    self.last_applied_mass = current_mass
+
+  def _update_flame(self) -> None:
+    lit = self.controller.engine_state is EngineState.LIT
+    span = self.controller.limits.max_throttle - self.controller.limits.min_throttle
+    normalized = (
+      (self.controller.throttle - self.controller.limits.min_throttle) / span
+      if span > 0.0
+      else 0.0
+    )
+    half_length = 0.25 + 0.75 * normalized
+    self.model.geom_size[self.flame_geom_id, 1] = half_length
+    self.model.geom_pos[self.flame_geom_id, 2] = (
+      FLAME_ORIGIN_BODY_Z_M - half_length
+    )
+    self.model.geom_rgba[self.flame_geom_id, 3] = 0.58 if lit else 0.0
+
+  def step(self) -> None:
+    self._update_landing_guidance()
+    self._update_hover_controller()
+    self.controller.consume_fuel(self.model.opt.timestep)
+    self._update_model_mass()
+    self._update_hover_controller()
+    self._apply_control()
+    self._update_flame()
+    mujoco.mj_step(self.model, self.data)
+
+  def telemetry_lines(self) -> tuple[str, ...]:
+    position = self.data.qpos[0:3]
+    velocity = self.data.qvel[0:3]
+    if self.landing_phase is LandingPhase.ALIGN:
+      mode_line = "MODE AUTO LAND: ALIGN OVER PAD"
+    elif self.landing_phase is LandingPhase.DESCEND:
+      mode_line = (
+        "MODE AUTO LAND: DESCEND    "
+        f"TARGET Z {self.hover_target_position[2]:.1f} m"
+      )
+    elif self.landing_phase is LandingPhase.COMPLETE:
+      mode_line = "MODE LANDED"
+    elif self.landing_phase is LandingPhase.ABORTED:
+      mode_line = "MODE LANDING ABORTED"
+    elif self.hover_enabled:
+      mode_line = (
+        "MODE HOVER HOLD    "
+        f"TARGET [{self.hover_target_position[0]:.1f}, "
+        f"{self.hover_target_position[1]:.1f}, "
+        f"{self.hover_target_position[2]:.1f}] m"
+      )
+    else:
+      mode_line = "MODE MANUAL"
+    return (
+      (
+        f"ENGINE {self.controller.engine_state.name}    "
+        f"THROTTLE {self.controller.throttle * 100:5.1f}%    "
+        f"THRUST {self.controller.thrust_magnitude_newtons() / 1000:5.1f} kN"
+      ),
+      (
+        f"POINTING {self.controller.pointing_angle_deg():4.1f} deg    "
+        f"FUEL {self.controller.fuel_mass_kg:7.1f} kg    "
+        f"HEIGHT AGL {position[2] - ROCKET_LANDED_COM_Z_M:6.1f} m    "
+        f"VZ {velocity[2]:6.1f} m/s"
+      ),
+      mode_line,
+      "H hover | L auto-land | arrows altitude/throttle | WASD position/thrust | K kill | R reset",
+    )
+
+
+class RocketWindow:
+  """Small GLFW-based MuJoCo viewer with a clickable engine-kill button."""
+
+  def __init__(self, simulation: RocketSimulation) -> None:
+    self.simulation = simulation
+    if not glfw.init():
+      raise RuntimeError("GLFW could not initialize a graphics context.")
+
+    glfw.window_hint(glfw.SAMPLES, 4)
+    self.window = glfw.create_window(
+      WINDOW_WIDTH, WINDOW_HEIGHT, APP_TITLE, None, None
+    )
+    if self.window is None:
+      glfw.terminate()
+      raise RuntimeError("GLFW could not create the MuJoCo window.")
+
+    glfw.make_context_current(self.window)
+    glfw.swap_interval(1)
+
+    self.camera = mujoco.MjvCamera()
+    self.option = mujoco.MjvOption()
+    self.scene = mujoco.MjvScene(self.simulation.model, maxgeom=10_000)
+    self.context = mujoco.MjrContext(
+      self.simulation.model, mujoco.mjtFontScale.mjFONTSCALE_150.value
+    )
+    mujoco.mjv_defaultCamera(self.camera)
+    mujoco.mjv_defaultOption(self.option)
+    self.camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+    self.camera.trackbodyid = self.simulation.rocket_body_id
+    self.camera.distance = 72.0
+    self.camera.azimuth = 135.0
+    self.camera.elevation = -14.0
+
+    self.mouse_left = False
+    self.mouse_middle = False
+    self.mouse_right = False
+    self.last_cursor_x = 0.0
+    self.last_cursor_y = 0.0
+    self.mouse_direction_command = np.zeros(2, dtype=float)
+    self.throttle_slider_dragging = False
+    self.ui_pointer_captured = False
+    self.previous_command_keys = {
+      glfw.KEY_H: False,
+      glfw.KEY_I: False,
+      glfw.KEY_K: False,
+      glfw.KEY_L: False,
+      glfw.KEY_R: False,
+    }
+    self.status_message = "Press Up, I, or IGNITE ENGINE to start"
+    self.status_until = time.monotonic() + 5.0
+
+    glfw.set_key_callback(self.window, self._on_key)
+    glfw.set_mouse_button_callback(self.window, self._on_mouse_button)
+    glfw.set_cursor_pos_callback(self.window, self._on_cursor_move)
+    glfw.set_scroll_callback(self.window, self._on_scroll)
+
+  @staticmethod
+  def _engine_button_rect_window(window_width: int) -> tuple[float, float, float, float]:
+    return (window_width - 210.0, 22.0, 188.0, 52.0)
+
+  @staticmethod
+  def _hover_button_rect_window(window_width: int) -> tuple[float, float, float, float]:
+    return (window_width - 210.0, 84.0, 188.0, 46.0)
+
+  @staticmethod
+  def _land_button_rect_window(window_width: int) -> tuple[float, float, float, float]:
+    return (window_width - 210.0, 140.0, 188.0, 46.0)
+
+  @staticmethod
+  def _direction_button_rects_window(
+    window_width: int,
+  ) -> dict[str, tuple[float, float, float, float]]:
+    panel_x = window_width - 210.0
+    return {
+      "W": (panel_x + 68.0, 214.0, 52.0, 42.0),
+      "A": (panel_x + 8.0, 264.0, 52.0, 42.0),
+      "S": (panel_x + 68.0, 264.0, 52.0, 42.0),
+      "D": (panel_x + 128.0, 264.0, 52.0, 42.0),
+    }
+
+  @staticmethod
+  def _thrust_slider_rect_window(
+    window_width: int,
+  ) -> tuple[float, float, float, float]:
+    return (window_width - 210.0, 354.0, 188.0, 20.0)
+
+  @classmethod
+  def _point_in_engine_button(
+    cls, cursor_x: float, cursor_y: float, window_width: int
+  ) -> bool:
+    x, y, width, height = cls._engine_button_rect_window(window_width)
+    return x <= cursor_x <= x + width and y <= cursor_y <= y + height
+
+  @classmethod
+  def _point_in_hover_button(
+    cls, cursor_x: float, cursor_y: float, window_width: int
+  ) -> bool:
+    x, y, width, height = cls._hover_button_rect_window(window_width)
+    return x <= cursor_x <= x + width and y <= cursor_y <= y + height
+
+  @classmethod
+  def _point_in_land_button(
+    cls, cursor_x: float, cursor_y: float, window_width: int
+  ) -> bool:
+    x, y, width, height = cls._land_button_rect_window(window_width)
+    return x <= cursor_x <= x + width and y <= cursor_y <= y + height
+
+  @classmethod
+  def _direction_command_for_point(
+    cls, cursor_x: float, cursor_y: float, window_width: int
+  ) -> np.ndarray | None:
+    commands = {
+      "W": np.array([0.0, 1.0]),
+      "A": np.array([-1.0, 0.0]),
+      "S": np.array([0.0, -1.0]),
+      "D": np.array([1.0, 0.0]),
+    }
+    for name, (x, y, width, height) in cls._direction_button_rects_window(
+      window_width
+    ).items():
+      if x <= cursor_x <= x + width and y <= cursor_y <= y + height:
+        return commands[name].copy()
+    return None
+
+  @classmethod
+  def _point_in_thrust_slider(
+    cls, cursor_x: float, cursor_y: float, window_width: int
+  ) -> bool:
+    x, y, width, height = cls._thrust_slider_rect_window(window_width)
+    return (
+      x <= cursor_x <= x + width
+      and y - 10.0 <= cursor_y <= y + height + 10.0
+    )
+
+  def _throttle_from_slider_x(self, cursor_x: float, window_width: int) -> float:
+    x, _, width, _ = self._thrust_slider_rect_window(window_width)
+    normalized = float(np.clip((cursor_x - x) / width, 0.0, 1.0))
+    limits = self.simulation.controller.limits
+    return limits.min_throttle + normalized * (
+      limits.max_throttle - limits.min_throttle
+    )
+
+  @staticmethod
+  def _direction_button_levels(command: np.ndarray) -> dict[str, float]:
+    x_command, y_command = np.asarray(command, dtype=float)
+    return {
+      "W": max(float(y_command), 0.0),
+      "A": max(float(-x_command), 0.0),
+      "S": max(float(-y_command), 0.0),
+      "D": max(float(x_command), 0.0),
+    }
+
+  def _set_status(self, message: str, duration: float = 2.0) -> None:
+    self.status_message = message
+    self.status_until = time.monotonic() + duration
+
+  def _ignite(self) -> None:
+    if self.simulation.controller.ignite():
+      self._set_status("ENGINE IGNITED - minimum thrust is active")
+    elif self.simulation.controller.engine_state is EngineState.SHUTDOWN:
+      self._set_status("Engine was killed; press R before reigniting")
+    elif self.simulation.controller.engine_state is EngineState.FUEL_OUT:
+      self._set_status("Fuel depleted; press R to reset")
+
+  def _kill_engine(self) -> None:
+    if self.simulation.controller.kill_engine():
+      self.simulation.disable_hover()
+      self._set_status("ENGINE KILLED - thrust jumped directly to zero")
+    else:
+      self._set_status("Engine is already off")
+
+  def _reset_flight(self) -> None:
+    self.simulation.reset()
+    self._set_status("FLIGHT RESET - engine off, fuel full", duration=3.0)
+
+  def _toggle_hover(self) -> None:
+    if self.simulation.hover_enabled:
+      self.simulation.disable_hover()
+      self._set_status("HOVER HOLD OFF - manual controls active")
+    elif self.simulation.enable_hover():
+      self._set_status("HOVER HOLD ON - current position captured", duration=3.0)
+    elif self.simulation.controller.engine_state is EngineState.SHUTDOWN:
+      self._set_status("Press R before enabling hover")
+    else:
+      self._set_status("Hover unavailable: engine has no fuel")
+
+  def _toggle_landing(self) -> None:
+    if self.simulation.landing_active:
+      self.simulation.cancel_landing()
+      self._set_status("AUTO LAND CANCELED - holding current position")
+    elif self.simulation.start_landing():
+      self._set_status("AUTO LAND ON - aligning over the pad", duration=3.0)
+    elif self.simulation.controller.engine_state is EngineState.SHUTDOWN:
+      self._set_status("Press R before starting another landing")
+    else:
+      self._set_status("Auto land unavailable: engine has no fuel")
+
+  def _set_manual_throttle_from_slider(
+    self, cursor_x: float, window_width: int
+  ) -> bool:
+    if self.simulation.landing_active or self.simulation.hover_enabled:
+      self._set_status("Autopilot currently owns the thrust slider")
+      return False
+    if self.simulation.controller.engine_state in (
+      EngineState.SHUTDOWN,
+      EngineState.FUEL_OUT,
+    ):
+      self._set_status("Press R before commanding thrust")
+      return False
+    if self.simulation.controller.engine_state is EngineState.OFF:
+      self._ignite()
+    self.simulation.controller.throttle = self._throttle_from_slider_x(
+      cursor_x, window_width
+    )
+    self._set_status(
+      f"MANUAL THRUST {self.simulation.controller.throttle * 100:.1f}%",
+      duration=1.0,
+    )
+    return True
+
+  def _apply_throttle_input(self, throttle_axis: float, dt: float) -> None:
+    if throttle_axis == 0.0:
+      return
+    if self.simulation.landing_active:
+      return
+    if self.simulation.hover_enabled:
+      self.simulation.move_hover_target(
+        np.array([0.0, 0.0, throttle_axis * HOVER_TARGET_SPEED_MPS * dt])
+      )
+      return
+    if throttle_axis > 0.0 and self.simulation.controller.engine_state is EngineState.OFF:
+      self._ignite()
+    self.simulation.controller.change_throttle(
+      throttle_axis * THROTTLE_RATE_PER_SECOND * dt
+    )
+
+  def _on_key(
+    self,
+    window,
+    key: int,
+    scancode: int,
+    action: int,
+    mods: int,
+  ) -> None:
+    del scancode, mods
+    if action == glfw.PRESS and key == glfw.KEY_ESCAPE:
+      glfw.set_window_should_close(window, True)
+      return
+
+    command_actions = {
+      glfw.KEY_H: self._toggle_hover,
+      glfw.KEY_I: self._ignite,
+      glfw.KEY_K: self._kill_engine,
+      glfw.KEY_L: self._toggle_landing,
+      glfw.KEY_R: self._reset_flight,
+    }
+    if key not in command_actions:
+      return
+    if action == glfw.PRESS:
+      command_actions[key]()
+      self.previous_command_keys[key] = True
+    elif action == glfw.RELEASE:
+      self.previous_command_keys[key] = False
+
+  def _on_mouse_button(self, window, button: int, action: int, mods: int) -> None:
+    del mods
+    self.mouse_left = glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS
+    self.mouse_middle = (
+      glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_MIDDLE) == glfw.PRESS
+    )
+    self.mouse_right = (
+      glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS
+    )
+
+    if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
+      cursor_x, cursor_y = glfw.get_cursor_pos(window)
+      window_width, _ = glfw.get_window_size(window)
+      self.ui_pointer_captured = False
+      if self._point_in_engine_button(cursor_x, cursor_y, window_width):
+        self.ui_pointer_captured = True
+        if self.simulation.controller.engine_state is EngineState.OFF:
+          self._ignite()
+        elif self.simulation.controller.engine_state is EngineState.LIT:
+          self._kill_engine()
+        else:
+          self._set_status("Press R to start a new flight")
+      elif self._point_in_hover_button(cursor_x, cursor_y, window_width):
+        self.ui_pointer_captured = True
+        self._toggle_hover()
+      elif self._point_in_land_button(cursor_x, cursor_y, window_width):
+        self.ui_pointer_captured = True
+        self._toggle_landing()
+      else:
+        direction_command = self._direction_command_for_point(
+          cursor_x, cursor_y, window_width
+        )
+        if direction_command is not None:
+          self.ui_pointer_captured = True
+          self.mouse_direction_command[:] = direction_command
+        elif self._point_in_thrust_slider(cursor_x, cursor_y, window_width):
+          self.ui_pointer_captured = True
+          self.throttle_slider_dragging = self._set_manual_throttle_from_slider(
+            cursor_x, window_width
+          )
+
+    if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.RELEASE:
+      self.mouse_direction_command[:] = 0.0
+      self.throttle_slider_dragging = False
+      self.ui_pointer_captured = False
+
+    self.last_cursor_x, self.last_cursor_y = glfw.get_cursor_pos(window)
+
+  def _on_cursor_move(self, window, xpos: float, ypos: float) -> None:
+    if self.throttle_slider_dragging:
+      window_width, _ = glfw.get_window_size(window)
+      self._set_manual_throttle_from_slider(xpos, window_width)
+      self.last_cursor_x, self.last_cursor_y = xpos, ypos
+      return
+    if self.ui_pointer_captured:
+      self.last_cursor_x, self.last_cursor_y = xpos, ypos
+      return
+    if not (self.mouse_left or self.mouse_middle or self.mouse_right):
+      self.last_cursor_x, self.last_cursor_y = xpos, ypos
+      return
+
+    dx = xpos - self.last_cursor_x
+    dy = ypos - self.last_cursor_y
+    self.last_cursor_x, self.last_cursor_y = xpos, ypos
+    _, height = glfw.get_window_size(window)
+    if height <= 0:
+      return
+
+    shift_down = (
+      glfw.get_key(window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS
+      or glfw.get_key(window, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS
+    )
+    if self.mouse_right:
+      action = (
+        mujoco.mjtMouse.mjMOUSE_MOVE_H
+        if shift_down
+        else mujoco.mjtMouse.mjMOUSE_MOVE_V
+      )
+    elif self.mouse_left:
+      action = (
+        mujoco.mjtMouse.mjMOUSE_ROTATE_H
+        if shift_down
+        else mujoco.mjtMouse.mjMOUSE_ROTATE_V
+      )
+    else:
+      action = mujoco.mjtMouse.mjMOUSE_ZOOM
+
+    mujoco.mjv_moveCamera(
+      self.simulation.model,
+      action,
+      dx / height,
+      dy / height,
+      self.scene,
+      self.camera,
+    )
+
+  def _on_scroll(self, window, xoffset: float, yoffset: float) -> None:
+    del window, xoffset
+    mujoco.mjv_moveCamera(
+      self.simulation.model,
+      mujoco.mjtMouse.mjMOUSE_ZOOM,
+      0.0,
+      -0.05 * yoffset,
+      self.scene,
+      self.camera,
+    )
+
+  def _read_flight_controls(self, dt: float) -> None:
+    command_actions = {
+      glfw.KEY_H: self._toggle_hover,
+      glfw.KEY_I: self._ignite,
+      glfw.KEY_K: self._kill_engine,
+      glfw.KEY_L: self._toggle_landing,
+      glfw.KEY_R: self._reset_flight,
+    }
+    for key, command in command_actions.items():
+      is_down = glfw.get_key(self.window, key) == glfw.PRESS
+      if is_down and not self.previous_command_keys[key]:
+        command()
+      self.previous_command_keys[key] = is_down
+
+    lateral_x = float(
+      (glfw.get_key(self.window, glfw.KEY_D) == glfw.PRESS)
+      - (glfw.get_key(self.window, glfw.KEY_A) == glfw.PRESS)
+    ) + self.mouse_direction_command[0]
+    lateral_y = float(
+      (glfw.get_key(self.window, glfw.KEY_W) == glfw.PRESS)
+      - (glfw.get_key(self.window, glfw.KEY_S) == glfw.PRESS)
+    ) + self.mouse_direction_command[1]
+    lateral_target = np.array([lateral_x, lateral_y], dtype=float)
+    target_norm = float(np.linalg.norm(lateral_target))
+    if target_norm > 1.0:
+      lateral_target /= target_norm
+
+    if self.simulation.landing_active:
+      pass
+    elif self.simulation.hover_enabled:
+      self.simulation.move_hover_target(
+        np.array(
+          [
+            lateral_target[0] * HOVER_TARGET_SPEED_MPS * dt,
+            lateral_target[1] * HOVER_TARGET_SPEED_MPS * dt,
+            0.0,
+          ]
+        )
+      )
+    else:
+      lateral_delta = lateral_target - self.simulation.controller.lateral_command
+      delta_norm = float(np.linalg.norm(lateral_delta))
+      max_delta = LATERAL_SLEW_RATE_PER_SECOND * dt
+      if delta_norm > max_delta > 0.0:
+        lateral_delta *= max_delta / delta_norm
+      self.simulation.controller.lateral_command += lateral_delta
+
+    throttle_axis = float(
+      (glfw.get_key(self.window, glfw.KEY_UP) == glfw.PRESS)
+      - (glfw.get_key(self.window, glfw.KEY_DOWN) == glfw.PRESS)
+    )
+    self._apply_throttle_input(throttle_axis, dt)
+
+  def _draw_button(self, framebuffer_width: int, framebuffer_height: int) -> None:
+    window_width, window_height = glfw.get_window_size(self.window)
+    if window_width <= 0 or window_height <= 0:
+      return
+    scale_x = framebuffer_width / window_width
+    scale_y = framebuffer_height / window_height
+    x, y, width, height = self._engine_button_rect_window(window_width)
+    rect = mujoco.MjrRect(
+      int(x * scale_x),
+      int((window_height - y - height) * scale_y),
+      int(width * scale_x),
+      int(height * scale_y),
+    )
+    state = self.simulation.controller.engine_state
+    if state is EngineState.OFF:
+      color = (0.05, 0.48, 0.20, 0.95)
+      label = "IGNITE ENGINE"
+    elif state is EngineState.LIT:
+      color = (0.72, 0.06, 0.04, 0.95)
+      label = "KILL ENGINE"
+    elif state is EngineState.SHUTDOWN:
+      color = (0.18, 0.19, 0.21, 0.90)
+      label = "ENGINE KILLED"
+    else:
+      color = (0.18, 0.19, 0.21, 0.90)
+      label = "FUEL DEPLETED"
+    mujoco.mjr_rectangle(rect, *color)
+    mujoco.mjr_overlay(
+      mujoco.mjtFont.mjFONT_BIG,
+      mujoco.mjtGridPos.mjGRID_TOPLEFT,
+      rect,
+      label,
+      "",
+      self.context,
+    )
+
+    land_x, land_y, land_width, land_height = self._land_button_rect_window(
+      window_width
+    )
+    land_rect = mujoco.MjrRect(
+      int(land_x * scale_x),
+      int((window_height - land_y - land_height) * scale_y),
+      int(land_width * scale_x),
+      int(land_height * scale_y),
+    )
+    if self.simulation.landing_phase is LandingPhase.ALIGN:
+      land_color = (0.78, 0.38, 0.02, 0.96)
+      land_label = "LAND: ALIGN"
+    elif self.simulation.landing_phase is LandingPhase.DESCEND:
+      land_color = (0.78, 0.38, 0.02, 0.96)
+      land_label = "LAND: DESCEND"
+    elif self.simulation.landing_phase is LandingPhase.COMPLETE:
+      land_color = (0.08, 0.48, 0.18, 0.94)
+      land_label = "LANDED"
+    else:
+      land_color = (0.40, 0.26, 0.08, 0.92)
+      land_label = "AUTO LAND"
+    mujoco.mjr_rectangle(land_rect, *land_color)
+    mujoco.mjr_overlay(
+      mujoco.mjtFont.mjFONT_BIG,
+      mujoco.mjtGridPos.mjGRID_TOPLEFT,
+      land_rect,
+      land_label,
+      "",
+      self.context,
+    )
+
+    hover_x, hover_y, hover_width, hover_height = self._hover_button_rect_window(
+      window_width
+    )
+    hover_rect = mujoco.MjrRect(
+      int(hover_x * scale_x),
+      int((window_height - hover_y - hover_height) * scale_y),
+      int(hover_width * scale_x),
+      int(hover_height * scale_y),
+    )
+    if self.simulation.hover_enabled:
+      hover_color = (0.02, 0.42, 0.70, 0.95)
+      hover_label = "HOVER ACTIVE"
+    else:
+      hover_color = (0.15, 0.25, 0.34, 0.92)
+      hover_label = "HOVER HOLD"
+    mujoco.mjr_rectangle(hover_rect, *hover_color)
+    mujoco.mjr_overlay(
+      mujoco.mjtFont.mjFONT_BIG,
+      mujoco.mjtGridPos.mjGRID_TOPLEFT,
+      hover_rect,
+      hover_label,
+      "",
+      self.context,
+    )
+
+    direction_levels = self._direction_button_levels(
+      self.simulation.controller.lateral_command
+    )
+    for direction, (button_x, button_y, button_width, button_height) in (
+      self._direction_button_rects_window(window_width).items()
+    ):
+      button_rect = mujoco.MjrRect(
+        int(button_x * scale_x),
+        int((window_height - button_y - button_height) * scale_y),
+        int(button_width * scale_x),
+        int(button_height * scale_y),
+      )
+      level = float(np.clip(direction_levels[direction], 0.0, 1.0))
+      button_color = (
+        0.13 - 0.08 * level,
+        0.18 + 0.30 * level,
+        0.24 + 0.55 * level,
+        0.94,
+      )
+      mujoco.mjr_rectangle(button_rect, *button_color)
+      mujoco.mjr_overlay(
+        mujoco.mjtFont.mjFONT_BIG,
+        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+        button_rect,
+        direction,
+        "",
+        self.context,
+      )
+
+    slider_x, slider_y, slider_width, slider_height = (
+      self._thrust_slider_rect_window(window_width)
+    )
+    slider_rect = mujoco.MjrRect(
+      int(slider_x * scale_x),
+      int((window_height - slider_y - slider_height) * scale_y),
+      int(slider_width * scale_x),
+      int(slider_height * scale_y),
+    )
+    limits = self.simulation.controller.limits
+    slider_fraction = float(
+      np.clip(
+        (self.simulation.controller.throttle - limits.min_throttle)
+        / (limits.max_throttle - limits.min_throttle),
+        0.0,
+        1.0,
+      )
+    )
+    mujoco.mjr_rectangle(slider_rect, 0.10, 0.12, 0.15, 0.96)
+    fill_rect = mujoco.MjrRect(
+      slider_rect.left,
+      slider_rect.bottom,
+      max(1, int(slider_rect.width * slider_fraction)),
+      slider_rect.height,
+    )
+    autopilot_owns_thrust = (
+      self.simulation.hover_enabled or self.simulation.landing_active
+    )
+    fill_color = (
+      (0.04, 0.48, 0.78, 0.96)
+      if autopilot_owns_thrust
+      else (0.95, 0.48, 0.05, 0.96)
+    )
+    mujoco.mjr_rectangle(fill_rect, *fill_color)
+    knob_width = max(8, int(10 * scale_x))
+    knob_left = int(
+      slider_rect.left + slider_fraction * slider_rect.width - knob_width / 2
+    )
+    knob_rect = mujoco.MjrRect(
+      knob_left,
+      slider_rect.bottom - max(2, int(3 * scale_y)),
+      knob_width,
+      slider_rect.height + max(4, int(6 * scale_y)),
+    )
+    mujoco.mjr_rectangle(knob_rect, 0.95, 0.96, 0.98, 1.0)
+
+    slider_label_rect = mujoco.MjrRect(
+      int(slider_x * scale_x),
+      int((window_height - 348.0) * scale_y),
+      int(slider_width * scale_x),
+      int(30.0 * scale_y),
+    )
+    slider_owner = "AUTO" if autopilot_owns_thrust else "MANUAL"
+    mujoco.mjr_overlay(
+      mujoco.mjtFont.mjFONT_NORMAL,
+      mujoco.mjtGridPos.mjGRID_TOPLEFT,
+      slider_label_rect,
+      f"THRUST {self.simulation.controller.throttle * 100:.1f}%  {slider_owner}",
+      "",
+      self.context,
+    )
+
+  def _render(self) -> None:
+    framebuffer_width, framebuffer_height = glfw.get_framebuffer_size(self.window)
+    viewport = mujoco.MjrRect(0, 0, framebuffer_width, framebuffer_height)
+    mujoco.mjv_updateScene(
+      self.simulation.model,
+      self.simulation.data,
+      self.option,
+      None,
+      self.camera,
+      mujoco.mjtCatBit.mjCAT_ALL.value,
+      self.scene,
+    )
+    mujoco.mjr_render(viewport, self.scene, self.context)
+    telemetry = list(self.simulation.telemetry_lines())
+    if time.monotonic() < self.status_until:
+      telemetry.append(f"STATUS: {self.status_message}")
+    mujoco.mjr_overlay(
+      mujoco.mjtFont.mjFONT_NORMAL,
+      mujoco.mjtGridPos.mjGRID_TOPLEFT,
+      viewport,
+      "\n".join(telemetry),
+      "",
+      self.context,
+    )
+    self._draw_button(framebuffer_width, framebuffer_height)
+
+  def run(self) -> None:
+    previous_time = time.monotonic()
+    accumulator = 0.0
+    try:
+      while not glfw.window_should_close(self.window):
+        now = time.monotonic()
+        wall_dt = min(now - previous_time, 0.05)
+        previous_time = now
+        self._read_flight_controls(wall_dt)
+        accumulator += wall_dt
+
+        while accumulator >= self.simulation.model.opt.timestep:
+          self.simulation.step()
+          accumulator -= self.simulation.model.opt.timestep
+
+        self._render()
+        glfw.swap_buffers(self.window)
+        glfw.poll_events()
+    finally:
+      self.context.free()
+      glfw.destroy_window(self.window)
+      glfw.terminate()
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.parse_args()
+  simulation = RocketSimulation()
+  RocketWindow(simulation).run()
+
+
+if __name__ == "__main__":
+  main()

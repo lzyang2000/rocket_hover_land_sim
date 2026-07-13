@@ -1,0 +1,94 @@
+<mujoco model="Falcon 9 proportioned powered descent rocket">
+  <compiler angle="degree" autolimits="true"/>
+  <option timestep="0.005" gravity="0 0 -9.81" integrator="implicitfast" solver="Newton"/>
+
+  <visual>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.75 0.75 0.75" specular="0.25 0.25 0.25"/>
+    <rgba haze="0.08 0.12 0.18 1"/>
+    <global azimuth="135" elevation="-14"/>
+  </visual>
+
+  <statistic center="0 0 20" extent="95"/>
+
+  <default>
+    <geom friction="0.9 0.04 0.01" condim="4" solref="0.025 1" solimp="0.90 0.95 0.003"/>
+  </default>
+
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.025 0.04 0.08" rgb2="0.18 0.25 0.34" width="512" height="3072"/>
+    <texture name="ground_tex" type="2d" builtin="checker" rgb1="0.16 0.18 0.20" rgb2="0.10 0.11 0.12" width="512" height="512" mark="edge" markrgb="0.25 0.27 0.30"/>
+    <material name="ground_mat" texture="ground_tex" texrepeat="30 30" reflectance="0.12"/>
+    <material name="white" rgba="0.84 0.85 0.84 1" metallic="0.35" roughness="0.42"/>
+    <material name="soot" rgba="0.16 0.17 0.17 1" metallic="0.45" roughness="0.40"/>
+    <material name="carbon" rgba="0.055 0.06 0.065 1" metallic="0.65" roughness="0.27"/>
+    <material name="leg" rgba="0.72 0.73 0.71 1" metallic="0.72" roughness="0.28"/>
+    <material name="engine" rgba="0.20 0.21 0.21 1" metallic="0.88" roughness="0.22"/>
+    <material name="pad" rgba="0.18 0.20 0.22 1" metallic="0.4" roughness="0.5"/>
+  </asset>
+
+  <worldbody>
+    <light pos="-45 -35 85" dir="0.5 0.4 -1" directional="true" diffuse="0.9 0.86 0.78" castshadow="true"/>
+    <light pos="55 30 55" dir="-0.8 -0.4 -1" directional="true" diffuse="0.26 0.34 0.5"/>
+
+    <geom name="ground" type="plane" size="300 300 0.1" material="ground_mat"/>
+    <geom name="landing_pad" type="cylinder" pos="0 0 0.08" size="15 0.08" material="pad"/>
+    <geom name="target_outer" type="cylinder" pos="0 0 0.172" size="9.0 0.01" rgba="0.88 0.52 0.12 1" contype="0" conaffinity="0"/>
+    <geom name="target_inner" type="cylinder" pos="0 0 0.184" size="7.4 0.012" rgba="0.14 0.16 0.18 1" contype="0" conaffinity="0"/>
+
+    <!--
+      Body coordinates approximate a Falcon 9 first stage: 41.2 m overall
+      height, 3.66 m tank diameter, and roughly 18 m deployed leg span.
+      Mass and thrust are educational landing-condition approximations.
+    -->
+    <body name="rocket" pos="0 0 20.76">
+      <freejoint name="rocket_freejoint"/>
+      <inertial pos="0 0 0" mass="30000" diaginertia="4300000 4300000 60000"/>
+
+      <!-- 3.66 m diameter propellant tank and upper interstage. -->
+      <geom name="fuselage" type="cylinder" pos="0 0 -0.50" size="1.83 16.90" material="white"/>
+      <geom name="upper_raceway" type="box" pos="0 -1.835 -0.2" size="0.10 0.055 15.6" material="soot" contype="0" conaffinity="0"/>
+      <geom name="interstage" type="cylinder" pos="0 0 18.42" size="1.83 2.02" material="carbon"/>
+      <geom name="interstage_lip" type="cylinder" pos="0 0 20.31" size="1.91 0.13" material="soot" contype="0" conaffinity="0"/>
+
+      <!-- Sooted engine section and octaweb. -->
+      <geom name="lower_skirt" type="cylinder" pos="0 0 -18.15" size="1.90 0.75" material="soot"/>
+      <geom name="octaweb" type="cylinder" pos="0 0 -19.22" size="1.66 0.32" material="carbon"/>
+
+      <!-- Four deployed grid fins near the top of the first stage. -->
+      <geom name="grid_fin_xp" type="box" pos="2.42 0 15.25" size="0.66 0.075 0.72" material="carbon" contype="0" conaffinity="0"/>
+      <geom name="grid_fin_xm" type="box" pos="-2.42 0 15.25" size="0.66 0.075 0.72" material="carbon" contype="0" conaffinity="0"/>
+      <geom name="grid_fin_yp" type="box" pos="0 2.42 15.25" size="0.075 0.66 0.72" material="carbon" contype="0" conaffinity="0"/>
+      <geom name="grid_fin_ym" type="box" pos="0 -2.42 15.25" size="0.075 0.66 0.72" material="carbon" contype="0" conaffinity="0"/>
+
+      <!-- Four deployed legs; the feet define the landed body-center height. -->
+      <geom name="leg_xp" type="capsule" fromto="1.63 0 -13.10 8.50 0 -20.38" size="0.16" material="leg"/>
+      <geom name="leg_xm" type="capsule" fromto="-1.63 0 -13.10 -8.50 0 -20.38" size="0.16" material="leg"/>
+      <geom name="leg_yp" type="capsule" fromto="0 1.63 -13.10 0 8.50 -20.38" size="0.16" material="leg"/>
+      <geom name="leg_ym" type="capsule" fromto="0 -1.63 -13.10 0 -8.50 -20.38" size="0.16" material="leg"/>
+
+      <geom name="strut_xp" type="capsule" fromto="1.72 0 -17.15 8.50 0 -20.38" size="0.095" material="soot"/>
+      <geom name="strut_xm" type="capsule" fromto="-1.72 0 -17.15 -8.50 0 -20.38" size="0.095" material="soot"/>
+      <geom name="strut_yp" type="capsule" fromto="0 1.72 -17.15 0 8.50 -20.38" size="0.095" material="soot"/>
+      <geom name="strut_ym" type="capsule" fromto="0 -1.72 -17.15 0 -8.50 -20.38" size="0.095" material="soot"/>
+
+      <geom name="foot_xp" type="ellipsoid" pos="8.50 0 -20.38" size="0.72 0.38 0.22" material="leg"/>
+      <geom name="foot_xm" type="ellipsoid" pos="-8.50 0 -20.38" size="0.72 0.38 0.22" material="leg"/>
+      <geom name="foot_yp" type="ellipsoid" pos="0 8.50 -20.38" size="0.38 0.72 0.22" material="leg"/>
+      <geom name="foot_ym" type="ellipsoid" pos="0 -8.50 -20.38" size="0.38 0.72 0.22" material="leg"/>
+
+      <!-- Nine Merlin-like engine bells in a 1+8 arrangement. -->
+      <geom name="engine_center" type="cylinder" pos="0 0 -19.82" size="0.42 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_1" type="cylinder" pos="1.06 0 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_2" type="cylinder" pos="0.75 0.75 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_3" type="cylinder" pos="0 1.06 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_4" type="cylinder" pos="-0.75 0.75 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_5" type="cylinder" pos="-1.06 0 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_6" type="cylinder" pos="-0.75 -0.75 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_7" type="cylinder" pos="0 -1.06 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+      <geom name="engine_8" type="cylinder" pos="0.75 -0.75 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
+
+      <geom name="engine_flame" type="cylinder" pos="0 0 -20.60" size="0.30 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <site name="thrust_origin" pos="0 0 -20.10" size="0.11" rgba="1 0.55 0.1 1"/>
+    </body>
+  </worldbody>
+</mujoco>
