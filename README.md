@@ -53,7 +53,7 @@ uv run rocket-landing
 
 The `dev` extra installs pytest. If you only want to run the simulator, `uv sync` is sufficient.
 
-The default launcher uses synchronous MPC so every optimized command is based on the current MuJoCo state and current GUI target. To opt back into background solving, use `uv run rocket-landing --async-mpc`.
+The default launcher uses synchronous MPC so every optimized command is based on the current MuJoCo state and current GUI target. It precompiles the conic problem before opening the window, moving the one-time cold-start cost out of the first hover command. To opt back into background solving, use `uv run rocket-landing --async-mpc`.
 
 ## Setup with a standard virtual environment
 
@@ -76,7 +76,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.6`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.7`.
 
 ## Controls
 
@@ -142,7 +142,7 @@ WASD remains position-target driven: the position error and measured rocket velo
 
 Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC` appears when the optional background-worker mode is selected. `6-DOF FALLBACK` means a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude controller handoff. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `FALLBACK ACTIVE`, or gray `MANUAL TVC`.
 
-Synchronous mode can pause rendering and input briefly during a solve—typically around 100–250 ms after warm-up—but it avoids applying a command computed from an older rocket state and an older WASD target. Async mode keeps the window smoother at the cost of that command latency.
+Synchronous mode can pause rendering and input briefly during a solve—typically around 70–150 ms after warm-up on the development Mac—but it avoids applying a command computed from an older rocket state and an older WASD target. Async mode keeps the window smoother at the cost of that command latency.
 
 ### Automatic landing
 
@@ -277,9 +277,9 @@ uv run pytest -q
 
 Close all Python/MuJoCo simulator windows and relaunch. Existing processes retain the old code.
 
-### Hover initially says `WARMING` or `FALLBACK`
+### Startup takes a moment before the window appears
 
-The first conic solve includes one-time solver canonicalization and can take a few tenths of a second. The fallback controller remains active until a valid MPC command arrives. Warm solves are normally much faster.
+The launcher performs one throwaway MPC solve to compile and cache CVXPY's conic problem before creating the window. This takes a few tenths of a second but prevents the one-time canonicalization cost from occurring when hover is first enabled.
 
 ### The rocket does not lift
 

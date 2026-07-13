@@ -71,6 +71,8 @@ x_{k+1}\approx A_kx_k+B_ku_k+c_k+\nu_k.
 
 The virtual control `nu_k` follows the paper’s artificial-infeasibility safeguard and receives a large L1 penalty. Scaled trust regions keep each convex solution near the trajectory about which the dynamics were linearized.
 
+The numerical Jacobian uses forward finite differences during hover and reuses the nominal RK4 propagation for all perturbations at a node. Landing uses central differences for additional trajectory-linearization accuracy. Fuel-dependent mass properties are cached by mass in both modes. This preserves the eight-step, three-iteration controller while reducing the dominant hover linearization cost rather than shortening the horizon.
+
 Each convex subproblem includes:
 
 - lower and upper thrust bounds;

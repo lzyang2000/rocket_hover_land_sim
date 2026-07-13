@@ -201,7 +201,7 @@ At each SCvx iteration they are linearized numerically around a nominal trajecto
 x_{k+1}\approx A_kx_k+B_ku_k+c_k+\nu_k.
 \]
 
-Central finite differences produce `A_k` and `B_k`. The affine offset is
+Hover uses forward finite differences to produce `A_k` and `B_k`; each node reuses the nominal dynamics evaluation for every state and control perturbation, cutting the number of RK4 propagations nearly in half. Landing retains central differences because its coupled attitude/descent trajectory was measurably more sensitive to one-sided Jacobians. Repeated fuel-dependent mass-property evaluations are cached by mass in both modes. The affine offset is
 
 \[
 c_k=F_d(\bar x_k,\bar u_k)-A_k\bar x_k-B_k\bar u_k.
@@ -246,7 +246,7 @@ The paper primarily presents trajectory optimization. This simulator turns that 
 4. advance the plant;
 5. shift the previous solution and solve again.
 
-The interactive launcher uses synchronous MPC by default. Each solve samples the current MuJoCo state and current GUI target, and its first command is applied before physics advances again. This removes the state/target age introduced when a background solve finishes several frames later. The tradeoff is a brief rendering and input pause during each solve. Passing `--async-mpc` restores the background worker, where the most recent valid command is held between optimizer updates.
+The interactive launcher uses synchronous MPC by default. Each solve samples the current MuJoCo state and current GUI target, and its first command is applied before physics advances again. This removes the state/target age introduced when a background solve finishes several frames later. The tradeoff is a brief rendering and input pause during each solve. Passing `--async-mpc` restores the background worker, where the most recent valid command is held between optimizer updates. A throwaway solve before window creation pays the one-time CVXPY canonicalization cost during startup.
 
 Every result is checked for solver status, finite values, actuator bounds, and nonlinear rollout defect. Until the first valid solution arrives—or whenever a solve fails—the simulator uses a deterministic 6-DOF fallback controller. Failure cannot leave unconstrained or stale actuator commands active.
 

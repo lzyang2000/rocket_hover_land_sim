@@ -113,6 +113,15 @@ def test_moving_reference_advances_position_across_the_horizon() -> None:
   )
 
 
+def test_mass_properties_are_cached_for_repeated_linearization_states() -> None:
+  controller = SixDofMPC(MPCConfig(horizon_steps=4, successive_iterations=1))
+
+  first = controller.mass_properties(29_500.0)
+  second = controller.mass_properties(29_500.0)
+
+  assert second is first
+
+
 def test_mpc_prediction_respects_ground_and_tilt_constraints() -> None:
   config = MPCConfig(horizon_steps=5, successive_iterations=2)
   controller = SixDofMPC(config)

@@ -73,7 +73,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.6 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.7 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -206,6 +206,20 @@ class RocketSimulation:
     if self._mpc_executor is not None:
       self._mpc_executor.shutdown(wait=False, cancel_futures=True)
       self._mpc_executor = None
+
+  def warm_up_mpc(self) -> None:
+    """Compile and cache the MPC problem without changing the vehicle state."""
+
+    if not isinstance(self.mpc, SixDofMPC):
+      return
+    self.mpc.solve(
+      self._mpc_state(),
+      self._mpc_target_state(),
+      self._current_actuator_control(),
+      max_gimbal_radians=self._mpc_gimbal_limit_radians(),
+      central_differences=False,
+    )
+    self.mpc.reset()
 
   def _invalidate_mpc_solution(self) -> None:
     self._mpc_generation += 1
@@ -626,6 +640,7 @@ class RocketSimulation:
     target: np.ndarray,
     previous_control: np.ndarray,
     max_gimbal_radians: float,
+    central_differences: bool,
   ) -> tuple[int, MPCResult]:
     if isinstance(controller, SixDofMPC):
       result = controller.solve(
@@ -633,6 +648,7 @@ class RocketSimulation:
         target,
         previous_control,
         max_gimbal_radians=max_gimbal_radians,
+        central_differences=central_differences,
       )
     else:
       result = controller.solve(state, target, previous_control)
@@ -718,6 +734,7 @@ class RocketSimulation:
     target = self._mpc_target_state()
     previous = self._current_actuator_control()
     max_gimbal_radians = self._mpc_gimbal_limit_radians()
+    central_differences = self.landing_active
     self.last_mpc_request_time = float(self.data.time)
     if self._mpc_executor is None:
       if isinstance(self.mpc, SixDofMPC):
@@ -726,6 +743,7 @@ class RocketSimulation:
           target,
           previous,
           max_gimbal_radians=max_gimbal_radians,
+          central_differences=central_differences,
         )
       else:
         result = self.mpc.solve(state, target, previous)
@@ -739,6 +757,7 @@ class RocketSimulation:
       target,
       previous,
       max_gimbal_radians,
+      central_differences,
     )
 
   def _update_hover_controller(self, *, force: bool = False) -> None:
@@ -1920,6 +1939,7 @@ def main() -> None:
     enable_mpc=True,
     asynchronous_mpc=args.async_mpc,
   )
+  simulation.warm_up_mpc()
   RocketWindow(simulation).run()
 
 

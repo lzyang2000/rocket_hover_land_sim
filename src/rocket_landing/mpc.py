@@ -218,6 +218,7 @@ class SixDofMPC:
     )
     self._nominal_states: np.ndarray | None = None
     self._nominal_controls: np.ndarray | None = None
+    self._mass_properties_cache: dict[float, MassProperties] = {}
     self._build_problem()
 
   def reset(self) -> None:
@@ -227,7 +228,15 @@ class SixDofMPC:
   def mass_properties(self, mass_kg: float) -> MassProperties:
     """Return the fuel-dependent mass properties used by prediction."""
 
-    return self.mass_model.properties(mass_kg)
+    key = float(mass_kg)
+    cached = self._mass_properties_cache.get(key)
+    if cached is not None:
+      return cached
+    properties = self.mass_model.properties(key)
+    if len(self._mass_properties_cache) >= 4096:
+      self._mass_properties_cache.clear()
+    self._mass_properties_cache[key] = properties
+    return properties
 
   def continuous_dynamics(self, state: np.ndarray, control: np.ndarray) -> np.ndarray:
     """Evaluate the paper-style 6-DOF rigid-body differential equation."""
@@ -301,29 +310,45 @@ class SixDofMPC:
     return result
 
   def _linearize(
-    self, state: np.ndarray, control: np.ndarray
+    self,
+    state: np.ndarray,
+    control: np.ndarray,
+    *,
+    central_differences: bool,
   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     base = self.discrete_dynamics(state, control)
     state_matrix = np.zeros((NX, NX), dtype=float)
     control_matrix = np.zeros((NX, NU), dtype=float)
     for index, epsilon in enumerate(self._state_difference):
       plus = np.asarray(state, dtype=float).copy()
-      minus = np.asarray(state, dtype=float).copy()
       plus[index] += epsilon
-      minus[index] -= epsilon
-      state_matrix[:, index] = (
-        self.discrete_dynamics(plus, control)
-        - self.discrete_dynamics(minus, control)
-      ) / (2.0 * epsilon)
+      if central_differences:
+        minus = np.asarray(state, dtype=float).copy()
+        minus[index] -= epsilon
+        state_matrix[:, index] = (
+          self.discrete_dynamics(plus, control)
+          - self.discrete_dynamics(minus, control)
+        ) / (2.0 * epsilon)
+      else:
+        state_matrix[:, index] = (
+          self.discrete_dynamics(plus, control)
+          - base
+        ) / epsilon
     for index, epsilon in enumerate(self._control_difference):
       plus = np.asarray(control, dtype=float).copy()
-      minus = np.asarray(control, dtype=float).copy()
       plus[index] += epsilon
-      minus[index] -= epsilon
-      control_matrix[:, index] = (
-        self.discrete_dynamics(state, plus)
-        - self.discrete_dynamics(state, minus)
-      ) / (2.0 * epsilon)
+      if central_differences:
+        minus = np.asarray(control, dtype=float).copy()
+        minus[index] -= epsilon
+        control_matrix[:, index] = (
+          self.discrete_dynamics(state, plus)
+          - self.discrete_dynamics(state, minus)
+        ) / (2.0 * epsilon)
+      else:
+        control_matrix[:, index] = (
+          self.discrete_dynamics(state, plus)
+          - base
+        ) / epsilon
     offset = base - state_matrix @ state - control_matrix @ control
     return state_matrix, control_matrix, offset
 
@@ -532,6 +557,7 @@ class SixDofMPC:
     target_state: np.ndarray,
     previous_control: np.ndarray | None = None,
     max_gimbal_radians: float | None = None,
+    central_differences: bool = True,
   ) -> MPCResult:
     """Solve successive convex subproblems and return the first command."""
 
@@ -586,7 +612,9 @@ class SixDofMPC:
       for iteration in range(self.config.successive_iterations):
         for node in range(self.config.horizon_steps):
           matrix_a, matrix_b, offset = self._linearize(
-            nominal_states[:, node], nominal_controls[:, node]
+            nominal_states[:, node],
+            nominal_controls[:, node],
+            central_differences=central_differences,
           )
           self._a_parameters[node].value = matrix_a
           self._b_parameters[node].value = matrix_b

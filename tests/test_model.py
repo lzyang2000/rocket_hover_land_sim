@@ -37,6 +37,21 @@ def test_launcher_defaults_to_synchronous_mpc() -> None:
   assert parser.parse_args(["--async-mpc"]).async_mpc
 
 
+def test_mpc_warmup_does_not_mutate_the_vehicle() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  qpos = simulation.data.qpos.copy()
+  qvel = simulation.data.qvel.copy()
+  fuel_mass_kg = simulation.controller.fuel_mass_kg
+
+  simulation.warm_up_mpc()
+
+  assert simulation.data.qpos == pytest.approx(qpos)
+  assert simulation.data.qvel == pytest.approx(qvel)
+  assert simulation.controller.fuel_mass_kg == pytest.approx(fuel_mass_kg)
+  assert simulation.last_mpc_result is None
+  assert simulation.mpc_using_fallback
+
+
 def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   simulation = RocketSimulation()
   fuselage_id = mujoco.mj_name2id(
