@@ -258,7 +258,7 @@ Telemetry distinguishes:
 - `6-DOF FALLBACK`;
 - manual `6-DOF TVC` control.
 
-The simulator uses a normalized nonlinear-defect acceptance limit of 0.20. This is less brittle than the previous 0.10 cutoff while remaining bounded by actuator limits and the independent MuJoCo plant. Automatic MPC gimbal authority is limited to 6°, inside the 20° mechanical cone.
+The simulator uses a normalized nonlinear-defect acceptance limit of 0.20. This is less brittle than the previous 0.10 cutoff while remaining bounded by actuator limits and the independent MuJoCo plant. MPC gimbal authority is scheduled to 5° for hover and 6° for high-altitude landing, inside the 20° mechanical cone. The deterministic automatic controller can use the 6° envelope when stronger recovery authority is required.
 
 ## 8. Manual 6-DOF control
 
@@ -278,7 +278,7 @@ This full heading constraint fixes the former underdetermined-yaw behavior. The 
 
 ## 9. Hover and auto-land references
 
-Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD moves the horizontal target, and Up/Down moves its altitude. Auto-land additionally supplies a nonzero vertical target velocity so the controller tracks a deliberate descent profile rather than chasing a moving position target whose nominal velocity is incorrectly zero.
+Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD moves the horizontal target, and Up/Down moves its altitude. The target is clamped to a 2.5 m horizontal and 2 m vertical lead relative to the measured center of mass. While an input remains held, this bounded position reference advances with the rocket; it cannot run several metres ahead during the initial counter-tilt and provoke a large corrective swing. Auto-land additionally supplies a nonzero vertical target velocity so the controller tracks a deliberate descent profile rather than chasing a moving position target whose nominal velocity is incorrectly zero.
 
 Auto-land supplies references through two phases:
 

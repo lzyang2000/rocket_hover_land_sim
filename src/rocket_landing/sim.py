@@ -45,7 +45,10 @@ ROLL_RCS_TIME_CONSTANT_S = 0.10
 GIMBAL_TIME_CONSTANT_S = 0.08
 TERMINAL_GIMBAL_TIME_CONSTANT_S = 0.20
 TERMINAL_GIMBAL_DEADBAND_RADIANS = math.radians(0.15)
-AUTOPILOT_GIMBAL_LIMIT_RADIANS = math.radians(6.0)
+HOVER_MPC_GIMBAL_LIMIT_RADIANS = math.radians(5.0)
+LANDING_GIMBAL_LIMIT_RADIANS = math.radians(6.0)
+HOVER_TARGET_HORIZONTAL_LEAD_M = 2.5
+HOVER_TARGET_VERTICAL_LEAD_M = 2.0
 LANDING_ALIGNMENT_HORIZONTAL_LEAD_M = 4.0
 LANDING_ALIGNMENT_VERTICAL_LEAD_M = 2.0
 MPC_TERMINAL_HANDOFF_HEIGHT_M = 7.0
@@ -70,7 +73,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.4 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.5 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -139,7 +142,7 @@ class RocketSimulation:
       ),
       min_thrust_newtons=self.controller.limits.min_thrust_newtons,
       max_thrust_newtons=self.controller.limits.max_thrust_newtons,
-      max_gimbal_radians=AUTOPILOT_GIMBAL_LIMIT_RADIANS,
+      max_gimbal_radians=LANDING_GIMBAL_LIMIT_RADIANS,
       max_roll_torque_nm=MAX_ROLL_CONTROL_TORQUE_NM,
       minimum_com_height_m=(
         ROCKET_LANDED_COM_Z_M
@@ -517,8 +520,25 @@ class RocketSimulation:
         self.landing_phase = LandingPhase.COMPLETE
 
   def move_hover_target(self, delta_world: np.ndarray) -> None:
-    if self.hover_enabled:
+    if self.hover_enabled and not self.landing_active:
       self.hover_target_position += np.asarray(delta_world, dtype=float)
+      position = self.center_of_mass_position_world()
+      horizontal_offset = self.hover_target_position[0:2] - position[0:2]
+      horizontal_distance = float(np.linalg.norm(horizontal_offset))
+      if horizontal_distance > HOVER_TARGET_HORIZONTAL_LEAD_M:
+        self.hover_target_position[0:2] = (
+          position[0:2]
+          + horizontal_offset
+          * HOVER_TARGET_HORIZONTAL_LEAD_M
+          / horizontal_distance
+        )
+      self.hover_target_position[2] = position[2] + float(
+        np.clip(
+          self.hover_target_position[2] - position[2],
+          -HOVER_TARGET_VERTICAL_LEAD_M,
+          HOVER_TARGET_VERTICAL_LEAD_M,
+        )
+      )
 
   def _fallback_hover_guidance(self) -> None:
     """Deterministic constrained PD guidance used if MPC is unavailable."""
@@ -697,7 +717,7 @@ class RocketSimulation:
     state = self._mpc_state()
     target = self._mpc_target_state()
     previous = self._current_actuator_control()
-    max_gimbal_radians = self._active_gimbal_limit_radians()
+    max_gimbal_radians = self._mpc_gimbal_limit_radians()
     self.last_mpc_request_time = float(self.data.time)
     if self._mpc_executor is None:
       if isinstance(self.mpc, SixDofMPC):
@@ -822,9 +842,11 @@ class RocketSimulation:
     )
     if not self.hover_enabled:
       return mechanical_limit
-    autopilot_limit = min(mechanical_limit, AUTOPILOT_GIMBAL_LIMIT_RADIANS)
+    landing_limit = min(mechanical_limit, LANDING_GIMBAL_LIMIT_RADIANS)
+    if not self.landing_active:
+      return landing_limit
     if self.landing_phase is not LandingPhase.DESCEND:
-      return autopilot_limit
+      return landing_limit
     height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
     if height <= 1.0:
       return math.radians(0.75)
@@ -832,7 +854,13 @@ class RocketSimulation:
       return math.radians(1.5)
     if height <= 5.0:
       return math.radians(3.0)
-    return autopilot_limit
+    return landing_limit
+
+  def _mpc_gimbal_limit_radians(self) -> float:
+    active_limit = self._active_gimbal_limit_radians()
+    if self.landing_active:
+      return active_limit
+    return min(active_limit, HOVER_MPC_GIMBAL_LIMIT_RADIANS)
 
   @staticmethod
   def _limit_vector_magnitude(vector: np.ndarray, limit: float) -> np.ndarray:
