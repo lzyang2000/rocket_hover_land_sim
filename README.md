@@ -86,7 +86,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.14`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.15`.
 
 ## Controls
 
@@ -162,7 +162,7 @@ Synchronous mode can pause rendering and input briefly during a solve—typicall
 
 Press `L` or click `AUTO LAND`.
 
-The state machine supplies moving position and velocity references to the 6-DOF MPC. At 18 m altitude and below, ALIGN uses a four-metre horizontal and two-metre vertical lead instead of jumping directly to the pad. Above 18 m, the horizontal lead grows by 0.15 m per additional metre, capped at 8 m, so high-altitude lateral capture uses more of the available authority without changing the low-altitude controller. The descent-capture radius separately stays at 2 m through 18 m, then grows by 0.15 m per additional metre and is capped at 8 m. Descent starts when the normal capture gates are met or when a cubic transfer from the measured lateral position and velocity can reach pad center by the 7 m terminal handoff without exceeding 1.5 m/s² horizontal acceleration. This feasibility test lets recoverable high-altitude cases descend without imposing an unsafe timeout; unrecoverable states remain in ALIGN. It then uses an aggressive approach with terminal braking:
+The state machine supplies moving position and velocity references to the 6-DOF MPC. Normal auto-land first climbs or holds at a staging height at least 25 m above the pad. ALIGN uses a four-metre horizontal lead through 18 m altitude; above that, the lead grows by 0.15 m per additional metre and is capped at 8 m. The rocket must complete the lateral capture within 2 m, reduce horizontal speed below 1.0 m/s, and settle within 2 m and 1.5 m/s of the staging altitude before DESCEND begins. Alignment is therefore completed high rather than deferred into the final approach. Fuel-reserve takeover keeps the current altitude instead of commanding a fuel-consuming climb. It then uses an aggressive approach with terminal braking:
 
 - 12 m/s above 30 m;
 - 8 m/s from 18 to 30 m;
