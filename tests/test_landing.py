@@ -180,11 +180,11 @@ def test_full_fuel_does_not_trigger_reserve_takeover() -> None:
 def test_align_phase_accepts_a_coarser_pad_capture() -> None:
   simulation = RocketSimulation()
   simulation.data.qpos[0:3] = (
-    1.25,
+    1.80,
     0.0,
     ROCKET_LANDED_COM_Z_M + 12.0,
   )
-  simulation.data.qvel[0:3] = (0.50, 0.0, 0.50)
+  simulation.data.qvel[0:3] = (0.90, 0.0, 1.40)
   mujoco.mj_forward(simulation.model, simulation.data)
   simulation.controller.ignite()
   simulation.hover_enabled = True
@@ -196,6 +196,27 @@ def test_align_phase_accepts_a_coarser_pad_capture() -> None:
   simulation._update_landing_guidance()
 
   assert simulation.landing_phase is LandingPhase.DESCEND
+
+
+def test_align_phase_waits_outside_descent_capture_corridor() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[0:3] = (
+    2.20,
+    0.0,
+    ROCKET_LANDED_COM_Z_M + 12.0,
+  )
+  simulation.data.qvel[0:3] = (0.0, 0.0, 0.0)
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.ALIGN
+  simulation.landing_staging_altitude = (
+    simulation.center_of_mass_position_world()[2]
+  )
+
+  simulation._update_landing_guidance()
+
+  assert simulation.landing_phase is LandingPhase.ALIGN
 
 
 def test_mpc_offset_alignment_is_bounded_and_rarely_falls_back() -> None:

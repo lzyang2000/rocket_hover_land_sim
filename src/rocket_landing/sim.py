@@ -52,6 +52,10 @@ HOVER_TARGET_HORIZONTAL_LEAD_M = 2.5
 HOVER_TARGET_VERTICAL_LEAD_M = 2.0
 LANDING_ALIGNMENT_HORIZONTAL_LEAD_M = 4.0
 LANDING_ALIGNMENT_VERTICAL_LEAD_M = 2.0
+LANDING_DESCENT_CAPTURE_RADIUS_M = 2.0
+LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS = 1.0
+LANDING_DESCENT_CAPTURE_ALTITUDE_ERROR_M = 2.0
+LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS = 1.5
 MPC_TERMINAL_HANDOFF_HEIGHT_M = 7.0
 AUTO_LAND_FUEL_MARGIN = 1.05
 AUTO_LAND_FUEL_CHECK_PERIOD_S = 0.25
@@ -90,7 +94,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.9 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.10 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -528,10 +532,12 @@ class RocketSimulation:
         )
       )
       aligned = (
-        horizontal_error < 1.50
-        and horizontal_speed < 0.75
-        and abs(position[2] - self.landing_staging_altitude) < 1.00
-        and abs(velocity[2]) < 0.75
+        horizontal_error < LANDING_DESCENT_CAPTURE_RADIUS_M
+        and horizontal_speed
+        < LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS
+        and abs(position[2] - self.landing_staging_altitude)
+        < LANDING_DESCENT_CAPTURE_ALTITUDE_ERROR_M
+        and abs(velocity[2]) < LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS
       )
       if aligned:
         self.landing_phase = LandingPhase.DESCEND
