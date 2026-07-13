@@ -86,7 +86,7 @@ CVXPY constructs the SOCP and Clarabel solves it. The previous prediction is shi
 
 ## 5. Receding-horizon operation
 
-Hover and auto-land provide a moving target state to the MPC. A target with nonzero velocity is expanded into a time-varying reference trajectory, with reference position advanced by `k * prediction_dt * target_velocity` at each prediction node. The optimizer runs at a lower rate than MuJoCo physics, and the most recent first control is held between solves. The controller exposes solve status, solve time, dynamics defect, and virtual-control magnitude in telemetry.
+Hover and auto-land provide a moving target state to the MPC. A target with nonzero velocity is expanded into a time-varying reference trajectory, with reference position advanced by `k * prediction_dt * target_velocity` at each prediction node. The optimizer runs at a lower rate than MuJoCo physics. The interactive launcher solves synchronously by default, so physics waits and the first command corresponds to the sampled state and target. Optional `--async-mpc` mode holds the most recent valid command while a background solve is pending. The controller exposes timing mode, solve status, solve time, dynamics defect, and virtual-control magnitude in telemetry.
 
 If the solver is unavailable, infeasible, numerically invalid, or exceeds the accepted defect threshold, the simulator immediately uses a deterministic six-degree-of-freedom fallback controller. Solver failure therefore cannot remove attitude stabilization or leave stale unbounded commands active.
 

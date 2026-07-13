@@ -73,7 +73,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.5 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.6 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -1116,10 +1116,12 @@ class RocketSimulation:
       if self.mpc_using_fallback:
         control_line = "CTRL 6-DOF FALLBACK"
       elif self.last_mpc_result is None:
-        control_line = "CTRL SCVX MPC: WARMING"
+        timing = "ASYNC" if self.asynchronous_mpc else "SYNC"
+        control_line = f"CTRL SCVX MPC {timing}: WARMING"
       else:
+        timing = "ASYNC" if self.asynchronous_mpc else "SYNC"
         control_line = (
-          "CTRL SCVX MPC: "
+          f"CTRL SCVX MPC {timing}: "
           f"{self.last_mpc_result.status.upper()}  "
           f"{self.last_mpc_result.solve_time_seconds * 1000:.0f} ms"
         )
@@ -1899,10 +1901,25 @@ class RocketWindow:
       self.simulation.close()
 
 
-def main() -> None:
+def build_argument_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.parse_args()
-  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+  parser.add_argument(
+    "--async-mpc",
+    action="store_true",
+    help=(
+      "solve MPC on a background worker; keeps rendering responsive but "
+      "applies commands computed from an older state"
+    ),
+  )
+  return parser
+
+
+def main() -> None:
+  args = build_argument_parser().parse_args()
+  simulation = RocketSimulation(
+    enable_mpc=True,
+    asynchronous_mpc=args.async_mpc,
+  )
   RocketWindow(simulation).run()
 
 

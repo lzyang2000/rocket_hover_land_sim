@@ -246,7 +246,7 @@ The paper primarily presents trajectory optimization. This simulator turns that 
 4. advance the plant;
 5. shift the previous solution and solve again.
 
-The GUI submits solves on a background worker so rendering and input remain responsive. The most recent valid command is held between optimizer updates.
+The interactive launcher uses synchronous MPC by default. Each solve samples the current MuJoCo state and current GUI target, and its first command is applied before physics advances again. This removes the state/target age introduced when a background solve finishes several frames later. The tradeoff is a brief rendering and input pause during each solve. Passing `--async-mpc` restores the background worker, where the most recent valid command is held between optimizer updates.
 
 Every result is checked for solver status, finite values, actuator bounds, and nonlinear rollout defect. Until the first valid solution arrives—or whenever a solve fails—the simulator uses a deterministic 6-DOF fallback controller. Failure cannot leave unconstrained or stale actuator commands active.
 

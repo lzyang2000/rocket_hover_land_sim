@@ -17,6 +17,7 @@ from rocket_landing.sim import (
   THRUST_ARROW_MAX_LENGTH_M,
   RocketSimulation,
   RocketWindow,
+  build_argument_parser,
   model_path,
 )
 
@@ -27,6 +28,13 @@ def test_mjcf_compiles_and_contains_free_rocket() -> None:
   assert rocket_id > 0
   assert model.nq == 7
   assert model.nv == 6
+
+
+def test_launcher_defaults_to_synchronous_mpc() -> None:
+  parser = build_argument_parser()
+
+  assert not parser.parse_args([]).async_mpc
+  assert parser.parse_args(["--async-mpc"]).async_mpc
 
 
 def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
