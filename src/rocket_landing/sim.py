@@ -14,6 +14,7 @@ import mujoco
 import numpy as np
 
 from rocket_landing.controller import EngineState, RocketController
+from rocket_landing.mass_properties import MassProperties, RocketMassModel
 from rocket_landing.mpc import (
   ANGULAR_VELOCITY,
   GIMBAL,
@@ -35,8 +36,13 @@ THROTTLE_RATE_PER_SECOND = 0.12
 LATERAL_SLEW_RATE_PER_SECOND = 1.6
 ATTITUDE_KP_BODY = np.array([10_000_000.0, 10_000_000.0, 1_000_000.0])
 ATTITUDE_KD_BODY = np.array([13_000_000.0, 13_000_000.0, 350_000.0])
-MAX_ROLL_CONTROL_TORQUE_NM = 1_500_000.0
-MASS_UPDATE_PERIOD_S = 0.50
+ROLL_RCS_LEVER_ARM_M = 1.75
+ROLL_RCS_MAX_THRUSTER_FORCE_N = 5_000.0
+MAX_ROLL_CONTROL_TORQUE_NM = (
+  2.0 * ROLL_RCS_LEVER_ARM_M * ROLL_RCS_MAX_THRUSTER_FORCE_N
+)
+ROLL_RCS_TIME_CONSTANT_S = 0.10
+MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
 HOVER_VELOCITY_KD = np.array([0.70, 0.70, 1.80])
@@ -53,7 +59,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.8.1 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -89,9 +95,22 @@ class RocketSimulation:
     self.thrust_site_id = mujoco.mj_name2id(
       self.model, mujoco.mjtObj.mjOBJ_SITE, "thrust_origin"
     )
+    self.roll_rcs_xp_site_id = mujoco.mj_name2id(
+      self.model, mujoco.mjtObj.mjOBJ_SITE, "roll_rcs_xp"
+    )
+    self.roll_rcs_xm_site_id = mujoco.mj_name2id(
+      self.model, mujoco.mjtObj.mjOBJ_SITE, "roll_rcs_xm"
+    )
     self.initial_body_inertia = self.model.body_inertia[
       self.rocket_body_id
     ].copy()
+    self.mass_model = RocketMassModel(
+      dry_mass_kg=self.controller.dry_mass_kg,
+      initial_propellant_mass_kg=self.controller.initial_fuel_mass_kg,
+      initial_inertia_kgm2=tuple(
+        float(value) for value in self.initial_body_inertia
+      ),
+    )
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
     self.enable_mpc = enable_mpc
@@ -102,6 +121,7 @@ class RocketSimulation:
       ),
       dry_mass_kg=self.controller.dry_mass_kg,
       initial_inertia_kgm2=tuple(float(value) for value in self.initial_body_inertia),
+      mass_model=self.mass_model,
       engine_position_body_m=tuple(float(value) for value in ENGINE_POSITION_BODY),
       alpha_kg_per_newton_second=(
         self.controller.limits.alpha_kg_per_newton_second
@@ -112,7 +132,12 @@ class RocketSimulation:
         self.controller.limits.pointing_half_angle_deg
       ),
       max_roll_torque_nm=MAX_ROLL_CONTROL_TORQUE_NM,
-      minimum_com_height_m=ROCKET_LANDED_COM_Z_M - 0.10,
+      minimum_com_height_m=(
+        ROCKET_LANDED_COM_Z_M
+        + self.mass_model.properties(self.controller.dry_mass_kg)
+        .center_of_mass_body_m[2]
+        - 0.10
+      ),
     )
     self.mpc = SixDofMPC(self._mpc_config) if enable_mpc else None
     self._mpc_executor = (
@@ -126,6 +151,7 @@ class RocketSimulation:
     self.last_mpc_request_time = -math.inf
     self.mpc_using_fallback = True
     self.engine_gimbal_radians = np.zeros(2, dtype=float)
+    self.roll_control_torque_command_nm = 0.0
     self.roll_control_torque_nm = 0.0
     self.hover_enabled = False
     self.hover_target_position = np.zeros(3, dtype=float)
@@ -144,8 +170,10 @@ class RocketSimulation:
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
     self.engine_gimbal_radians[:] = 0.0
+    self.roll_control_torque_command_nm = 0.0
     self.roll_control_torque_nm = 0.0
     self._update_model_mass(force=True)
+    self.hover_target_position = self.center_of_mass_position_world()
     self._update_flame()
     mujoco.mj_forward(self.model, self.data)
 
@@ -168,7 +196,7 @@ class RocketSimulation:
     if self.controller.engine_state is not EngineState.LIT:
       return False
     self._invalidate_mpc_solution()
-    self.hover_target_position = self.data.qpos[0:3].copy()
+    self.hover_target_position = self.center_of_mass_position_world()
     self.hover_enabled = True
     self.landing_phase = LandingPhase.INACTIVE
     self._update_hover_controller(force=True)
@@ -185,6 +213,77 @@ class RocketSimulation:
   def landing_active(self) -> bool:
     return self.landing_phase in (LandingPhase.ALIGN, LandingPhase.DESCEND)
 
+  def applied_mass_properties(self) -> MassProperties:
+    """Return the mass properties currently installed in MuJoCo."""
+
+    return MassProperties(
+      mass_kg=float(self.model.body_mass[self.rocket_body_id]),
+      center_of_mass_body_m=self.model.body_ipos[self.rocket_body_id].copy(),
+      inertia_at_com_kgm2=self.model.body_inertia[self.rocket_body_id].copy(),
+    )
+
+  def current_mass_properties(self) -> MassProperties:
+    """Return continuous mass properties at the controller's current fuel mass."""
+
+    return self.mass_model.properties(self.controller.wet_mass_kg)
+
+  def center_of_mass_offset_rate_body(self) -> np.ndarray:
+    """Body-frame COM migration rate caused by current propellant flow."""
+
+    if self.controller.engine_state is not EngineState.LIT:
+      return np.zeros(3, dtype=float)
+    mass = self.controller.wet_mass_kg
+    if mass <= self.controller.dry_mass_kg:
+      return np.zeros(3, dtype=float)
+    lower_mass = max(mass - 1.0, self.controller.dry_mass_kg)
+    upper_mass = min(mass + 1.0, self.mass_model.initial_mass_kg)
+    if upper_mass <= lower_mass:
+      return np.zeros(3, dtype=float)
+    lower_com = self.mass_model.properties(
+      lower_mass
+    ).center_of_mass_body_m
+    upper_com = self.mass_model.properties(
+      upper_mass
+    ).center_of_mass_body_m
+    derivative_per_kg = (upper_com - lower_com) / (
+      upper_mass - lower_mass
+    )
+    mass_rate = -(
+      self.controller.limits.alpha_kg_per_newton_second
+      * self.controller.thrust_magnitude_newtons()
+    )
+    return derivative_per_kg * mass_rate
+
+  def center_of_mass_position_world(self) -> np.ndarray:
+    """World position of the current fuel-dependent center of mass."""
+
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    center_of_mass_body = (
+      self.current_mass_properties().center_of_mass_body_m
+    )
+    return (
+      self.data.qpos[0:3]
+      + rotation @ center_of_mass_body
+    )
+
+  def center_of_mass_velocity_world(self) -> np.ndarray:
+    """World linear velocity of the current center of mass."""
+
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    offset_body = self.current_mass_properties().center_of_mass_body_m
+    return (
+      self.data.qvel[0:3]
+      + rotation @ np.cross(self.data.qvel[3:6], offset_body)
+      + rotation @ self.center_of_mass_offset_rate_body()
+    )
+
+  def landing_center_of_mass_position(self) -> np.ndarray:
+    """Upright COM target when the landing-leg reference is on the pad."""
+
+    target = LANDING_PAD_POSITION.copy()
+    target[2] += self.current_mass_properties().center_of_mass_body_m[2]
+    return target
+
   def start_landing(self) -> bool:
     if self.controller.engine_state is EngineState.OFF:
       self.controller.ignite()
@@ -193,9 +292,10 @@ class RocketSimulation:
 
     self._invalidate_mpc_solution()
 
-    current_altitude = float(self.data.qpos[2])
+    current_altitude = float(self.center_of_mass_position_world()[2])
+    landed_com_altitude = float(self.landing_center_of_mass_position()[2])
     self.landing_staging_altitude = max(
-      current_altitude, LANDING_STAGING_MIN_ALTITUDE_M
+      current_altitude, landed_com_altitude + 12.0
     )
     self.hover_target_position = np.array(
       [0.0, 0.0, self.landing_staging_altitude], dtype=float
@@ -209,7 +309,7 @@ class RocketSimulation:
     if self.landing_active:
       self._invalidate_mpc_solution()
       self.landing_phase = LandingPhase.INACTIVE
-      self.hover_target_position = self.data.qpos[0:3].copy()
+      self.hover_target_position = self.center_of_mass_position_world()
       self.hover_enabled = True
 
   def _descent_rate_mps(self) -> float:
@@ -229,15 +329,18 @@ class RocketSimulation:
       self.landing_phase = LandingPhase.ABORTED
       return
 
-    position = self.data.qpos[0:3]
-    velocity = self.data.qvel[0:3]
+    position = self.center_of_mass_position_world()
+    velocity = self.center_of_mass_velocity_world()
+    body_position = self.data.qpos[0:3]
+    body_velocity = self.data.qvel[0:3]
+    landed_com_position = self.landing_center_of_mass_position()
     horizontal_error = float(np.linalg.norm(position[0:2]))
     horizontal_speed = float(np.linalg.norm(velocity[0:2]))
 
     if self.landing_phase is LandingPhase.ALIGN:
       self.hover_target_position[:] = (
-        LANDING_PAD_POSITION[0],
-        LANDING_PAD_POSITION[1],
+        landed_com_position[0],
+        landed_com_position[1],
         self.landing_staging_altitude,
       )
       aligned = (
@@ -250,16 +353,16 @@ class RocketSimulation:
         self.landing_phase = LandingPhase.DESCEND
 
     if self.landing_phase is LandingPhase.DESCEND:
-      self.hover_target_position[0:2] = LANDING_PAD_POSITION[0:2]
+      self.hover_target_position[0:2] = landed_com_position[0:2]
       self.hover_target_position[2] = max(
-        LANDING_PAD_POSITION[2],
+        landed_com_position[2],
         self.hover_target_position[2]
         - self._descent_rate_mps() * self.model.opt.timestep,
       )
-      height = float(position[2] - LANDING_PAD_POSITION[2])
+      height = float(body_position[2] - LANDING_PAD_POSITION[2])
       ready_for_cutoff = (
         height < 0.10
-        and -0.35 <= velocity[2] <= 0.10
+        and -0.35 <= body_velocity[2] <= 0.10
         and horizontal_error < 0.20
         and horizontal_speed < 0.15
       )
@@ -283,8 +386,8 @@ class RocketSimulation:
       self.disable_hover()
       return
 
-    position = self.data.qpos[0:3]
-    velocity = self.data.qvel[0:3]
+    position = self.center_of_mass_position_world()
+    velocity = self.center_of_mass_velocity_world()
     position_error = self.hover_target_position - position
     desired_acceleration = (
       HOVER_POSITION_KP * position_error - HOVER_VELOCITY_KD * velocity
@@ -325,8 +428,8 @@ class RocketSimulation:
   def _mpc_state(self) -> np.ndarray:
     state = np.zeros(14, dtype=float)
     state[MASS] = self.controller.wet_mass_kg
-    state[POSITION] = self.data.qpos[0:3]
-    state[VELOCITY] = self.data.qvel[0:3]
+    state[POSITION] = self.center_of_mass_position_world()
+    state[VELOCITY] = self.center_of_mass_velocity_world()
     state[QUATERNION] = normalize_quaternion(self.data.qpos[3:7])
     state[ANGULAR_VELOCITY] = self.data.qvel[3:6]
     return state
@@ -396,7 +499,7 @@ class RocketSimulation:
     if magnitude > max_gimbal:
       gimbal *= max_gimbal / magnitude
     self.engine_gimbal_radians[:] = gimbal
-    self.roll_control_torque_nm = float(
+    self.roll_control_torque_command_nm = float(
       np.clip(
         command[ROLL_TORQUE],
         -MAX_ROLL_CONTROL_TORQUE_NM,
@@ -507,11 +610,16 @@ class RocketSimulation:
   def _allocate_attitude_control(self, desired_up: np.ndarray) -> None:
     if self.controller.engine_state is not EngineState.LIT:
       self.engine_gimbal_radians[:] = 0.0
-      self.roll_control_torque_nm = 0.0
+      self.roll_control_torque_command_nm = 0.0
       return
     desired_torque = self._attitude_control_torque_body(desired_up)
     thrust = self.controller.thrust_magnitude_newtons()
-    lever_arm = abs(float(ENGINE_POSITION_BODY[2]))
+    lever_arm = abs(
+      float(
+        ENGINE_POSITION_BODY[2]
+        - self.current_mass_properties().center_of_mass_body_m[2]
+      )
+    )
     requested_lateral_force = np.array(
       [-desired_torque[1] / lever_arm, desired_torque[0] / lever_arm],
       dtype=float,
@@ -529,7 +637,7 @@ class RocketSimulation:
       self.engine_gimbal_radians[:] = (
         requested_lateral_force / requested_magnitude * angle
       )
-    self.roll_control_torque_nm = float(
+    self.roll_control_torque_command_nm = float(
       np.clip(
         desired_torque[2],
         -MAX_ROLL_CONTROL_TORQUE_NM,
@@ -537,29 +645,76 @@ class RocketSimulation:
       )
     )
 
+  def _update_roll_actuator(self) -> None:
+    """Apply a first-order valve/manifold response to the RCS command."""
+
+    target = (
+      self.roll_control_torque_command_nm
+      if self.controller.engine_state is EngineState.LIT
+      else 0.0
+    )
+    blend = 1.0 - math.exp(
+      -self.model.opt.timestep / ROLL_RCS_TIME_CONSTANT_S
+    )
+    self.roll_control_torque_nm += blend * (
+      target - self.roll_control_torque_nm
+    )
+    if abs(self.roll_control_torque_nm) < 1e-6:
+      self.roll_control_torque_nm = 0.0
+
+  def roll_rcs_force_pair_body(self) -> tuple[np.ndarray, np.ndarray]:
+    """Return opposed body-frame forces producing the current roll moment."""
+
+    force = float(
+      np.clip(
+        self.roll_control_torque_nm / (2.0 * ROLL_RCS_LEVER_ARM_M),
+        -ROLL_RCS_MAX_THRUSTER_FORCE_N,
+        ROLL_RCS_MAX_THRUSTER_FORCE_N,
+      )
+    )
+    return (
+      np.array([0.0, force, 0.0], dtype=float),
+      np.array([0.0, -force, 0.0], dtype=float),
+    )
+
+  def _apply_roll_rcs(self, rotation: np.ndarray) -> None:
+    positive_force_body, negative_force_body = self.roll_rcs_force_pair_body()
+    if abs(float(positive_force_body[1])) < 1e-9:
+      return
+    zero_torque = np.zeros(3, dtype=float)
+    for site_id, force_body in (
+      (self.roll_rcs_xp_site_id, positive_force_body),
+      (self.roll_rcs_xm_site_id, negative_force_body),
+    ):
+      mujoco.mj_applyFT(
+        self.model,
+        self.data,
+        rotation @ force_body,
+        zero_torque,
+        self.data.site_xpos[site_id],
+        self.rocket_body_id,
+        self.data.qfrc_applied,
+      )
+
   def _apply_control(self) -> None:
     self.data.qfrc_applied[:] = 0.0
     self.data.xfrc_applied[self.rocket_body_id, :] = 0.0
-    if self.controller.engine_state is not EngineState.LIT:
-      return
     rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
-    thrust_body = (
-      self.controller.thrust_magnitude_newtons()
-      * gimbal_direction_body(self.engine_gimbal_radians)
-    )
-    force_world = rotation @ thrust_body
-    torque_world = rotation @ np.array(
-      [0.0, 0.0, self.roll_control_torque_nm], dtype=float
-    )
-    mujoco.mj_applyFT(
-      self.model,
-      self.data,
-      force_world,
-      torque_world,
-      self.data.site_xpos[self.thrust_site_id],
-      self.rocket_body_id,
-      self.data.qfrc_applied,
-    )
+    if self.controller.engine_state is EngineState.LIT:
+      thrust_body = (
+        self.controller.thrust_magnitude_newtons()
+        * gimbal_direction_body(self.engine_gimbal_radians)
+      )
+      mujoco.mj_applyFT(
+        self.model,
+        self.data,
+        rotation @ thrust_body,
+        np.zeros(3, dtype=float),
+        self.data.site_xpos[self.thrust_site_id],
+        self.rocket_body_id,
+        self.data.qfrc_applied,
+      )
+    self._apply_roll_rcs(rotation)
 
   def thrust_arrow_world(
     self,
@@ -601,13 +756,13 @@ class RocketSimulation:
     ):
       return
 
-    initial_wet_mass = (
-      self.controller.dry_mass_kg + self.controller.initial_fuel_mass_kg
+    mass_properties = self.mass_model.properties(current_mass)
+    self.model.body_mass[self.rocket_body_id] = mass_properties.mass_kg
+    self.model.body_ipos[self.rocket_body_id] = (
+      mass_properties.center_of_mass_body_m
     )
-    mass_ratio = current_mass / initial_wet_mass
-    self.model.body_mass[self.rocket_body_id] = current_mass
     self.model.body_inertia[self.rocket_body_id] = (
-      self.initial_body_inertia * mass_ratio
+      mass_properties.inertia_at_com_kgm2
     )
 
     # mj_setConst temporarily evaluates the model at qpos0 and leaves MjData
@@ -656,6 +811,7 @@ class RocketSimulation:
     else:
       self._poll_mpc_result()
       self._allocate_attitude_control(self.controller.thrust_direction_world())
+    self._update_roll_actuator()
     self.controller.consume_fuel(self.model.opt.timestep)
     self._update_model_mass()
     self._apply_control()
@@ -717,7 +873,10 @@ class RocketSimulation:
         f"HEIGHT AGL {position[2] - ROCKET_LANDED_COM_Z_M:6.1f} m    "
         f"VZ {velocity[2]:6.1f} m/s"
       ),
-      f"{mode_line}    {control_line}",
+      (
+        f"{mode_line}    {control_line}    "
+        f"RCS {self.roll_control_torque_nm / 1000:+5.1f} kN m"
+      ),
       "3-D arrow: plume direction, vehicle thrust is opposite",
       "H hover | L auto-land | arrows altitude/throttle | WASD target/thrust | K kill | R reset",
     )

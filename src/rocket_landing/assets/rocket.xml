@@ -89,6 +89,9 @@
 
       <geom name="engine_flame" type="cylinder" pos="0 0 -20.60" size="0.30 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
       <site name="thrust_origin" pos="0 0 -20.10" size="0.11" rgba="1 0.55 0.1 1"/>
+      <!-- Opposed tangential RCS sites form a zero-net-force roll couple. -->
+      <site name="roll_rcs_xp" pos="1.75 0 15.25" size="0.09" rgba="0.15 0.75 1 0.8"/>
+      <site name="roll_rcs_xm" pos="-1.75 0 15.25" size="0.09" rgba="0.15 0.75 1 0.8"/>
     </body>
   </worldbody>
 </mujoco>

@@ -8,9 +8,11 @@ import pytest
 
 from rocket_landing.mpc import MPCResult, gimbal_direction_body
 from rocket_landing.sim import (
+  MAX_ROLL_CONTROL_TORQUE_NM,
   ROCKET_DIAMETER_M,
   ROCKET_HEIGHT_M,
   ROCKET_LANDED_COM_Z_M,
+  ROLL_RCS_MAX_THRUSTER_FORCE_N,
   THRUST_ARROW_MAX_LENGTH_M,
   RocketSimulation,
   RocketWindow,
@@ -142,6 +144,47 @@ def test_powered_six_dof_controller_removes_axial_spin_and_tilt_rates() -> None:
   assert np.linalg.norm(simulation.data.qvel[3:6]) < 1e-5
   assert abs(float(simulation.data.qpos[3]) - 1.0) < 1e-5
   assert np.linalg.norm(simulation.engine_gimbal_radians) < 1e-5
+
+
+def test_roll_rcs_is_a_lagged_zero_net_force_couple() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.ignite()
+  simulation.roll_control_torque_command_nm = MAX_ROLL_CONTROL_TORQUE_NM
+
+  simulation._update_roll_actuator()
+  assert 0.0 < simulation.roll_control_torque_nm < MAX_ROLL_CONTROL_TORQUE_NM
+  for _ in range(200):
+    simulation._update_roll_actuator()
+
+  positive_force, negative_force = simulation.roll_rcs_force_pair_body()
+  assert positive_force + negative_force == pytest.approx(np.zeros(3))
+  assert abs(positive_force[1]) <= ROLL_RCS_MAX_THRUSTER_FORCE_N
+
+  mass_properties = simulation.applied_mass_properties()
+  positive_position = simulation.model.site_pos[
+    simulation.roll_rcs_xp_site_id
+  ]
+  negative_position = simulation.model.site_pos[
+    simulation.roll_rcs_xm_site_id
+  ]
+  moment = np.cross(
+    positive_position - mass_properties.center_of_mass_body_m,
+    positive_force,
+  ) + np.cross(
+    negative_position - mass_properties.center_of_mass_body_m,
+    negative_force,
+  )
+  assert moment[0:2] == pytest.approx(np.zeros(2), abs=1e-9)
+  assert moment[2] == pytest.approx(simulation.roll_control_torque_nm)
+
+  simulation.controller.kill_engine()
+  simulation._apply_control()
+  assert simulation.data.qfrc_applied[0:5] == pytest.approx(
+    np.zeros(5), abs=1e-9
+  )
+  assert simulation.data.qfrc_applied[5] == pytest.approx(
+    simulation.roll_control_torque_nm
+  )
 
 
 def test_solver_failure_selects_safe_six_dof_fallback() -> None:

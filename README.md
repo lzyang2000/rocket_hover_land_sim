@@ -8,15 +8,15 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 
 ## What is included
 
-- MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, inertia, and contact.
+- MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, moving center of mass, inertia, and contact.
 - Falcon 9 first-stage proportions: approximately 41.2 m tall, 3.66 m diameter, and 18 m deployed leg span.
 - Four grid fins, four landing legs, and a nine-engine base with the center engine shown firing during landing.
 - Main-engine force applied at the physical engine pivot, producing coupled pitch/yaw torque.
-- Full quaternion attitude and heading control with bounded independent roll authority.
+- Full quaternion attitude and heading control with a physical opposed-thruster RCS roll couple.
 - Successive-linearization 6-DOF MPC solved as conic subproblems by CVXPY and Clarabel.
 - Gimbaled main-engine thrust constrained to a 20-degree mechanical cone.
 - Paper-inspired 20–80% throttle interval with a nonzero minimum after ignition.
-- Fuel consumption and changing body mass/inertia.
+- Fuel consumption with shared dry-stage/LOX/RP-1 center-of-mass and inertia modeling in MuJoCo and MPC.
 - Keyboard and clickable GUI flight controls.
 - Live directional indicators and a thrust slider that follow automatic guidance commands.
 - Live 3-D engine arrow whose direction follows gimbal and whose length follows thrust magnitude.
@@ -71,7 +71,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.8.1`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9`.
 
 ## Controls
 
@@ -119,7 +119,7 @@ The arrow is deliberately drawn outward through the visible plume, so it shows t
 
 ### Manual flight
 
-Ignition jumps directly from zero to the required 20% minimum thrust. Hold Up for roughly two seconds to pass the initial Earth hover point of approximately 40.9%. WASD commands a desired world-frame flight direction. A full SO(3) attitude controller allocates that command to the physical engine gimbal and roll actuator.
+Ignition jumps directly from zero to the required 20% minimum thrust. Hold Up for roughly two seconds to pass the initial Earth hover point of approximately 40.9%. WASD commands a desired world-frame flight direction. A full SO(3) attitude controller allocates that command to the physical engine gimbal and an opposed RCS force pair for roll.
 
 Releasing WASD returns thrust toward vertical but does not remove existing horizontal momentum. Counter-gimbal or enable hover to brake.
 
@@ -164,11 +164,18 @@ The exterior uses public Falcon 9 first-stage dimensions and recognizable propor
 | Initial wet mass | 30,000 kg |
 | Approximate dry mass | 21,000 kg |
 | Initial landing propellant | 9,000 kg |
+| Dry-stage COM offset | approximately 0.89 m below the initial reference |
+| Roll RCS lever arm | 1.75 m per side |
+| Maximum force per modeled RCS pod | 5,000 N |
+| Maximum roll moment | 17,500 N m |
+| RCS response time constant | 0.10 s |
 | Gravity | 9.81 m/s² |
 | Initial hover throttle | approximately 40.9% |
 | Fuel coefficient `alpha` | `5e-4` |
 
-Mass and thrust are both 30 times the original paper-example scale, preserving the same thrust-to-weight ratio and controller behavior while making the vehicle mass more representative of a depleted booster. The inertia is separately matched to the much taller body.
+Mass and thrust are both 30 times the original paper-example scale, preserving the same thrust-to-weight ratio while making the vehicle mass more representative of a depleted booster. Initial inertia is matched to the tall stage. As fuel drains, effective LOX and RP-1 liquid columns shorten toward their tank bottoms; MuJoCo and the MPC use the resulting shared COM, inertia, and engine lever arm rather than a uniform inertia-to-mass scale.
+
+The tank intervals and RCS force level are transparent engineering assumptions, not published Block 5 specifications. A real Falcon 9 combines phase-dependent differential engine gimballing, aerodynamic grid-fin authority, and cold-gas attitude control; this single-engine landing model uses the opposed force pair as the explicit low-authority axial actuator.
 
 The 20–80% throttle interval still comes from the paper-inspired educational model. A real Falcon 9 landing burn has different engine limits and generally cannot settle into a sustained hover because minimum Merlin thrust can exceed the nearly empty stage's weight. This simulator deliberately retains hover mode for control experiments.
 
@@ -178,15 +185,15 @@ Yes at both the mechanical and feedback-control layers:
 
 - the MuJoCo model has a free joint with three translation and three rotation degrees of freedom;
 - attitude is represented by a quaternion;
-- angular velocity, inertia, torque, collision, and landing-leg contact are simulated;
+- angular velocity, fuel-dependent inertia/COM, torque, collision, and landing-leg contact are simulated;
 - engine force is applied at the gimbal pivot rather than at the center of mass;
 - gimbal force creates physical pitch/yaw moments;
-- a bounded roll actuator closes the otherwise uncontrollable axial degree of freedom;
+- two opposed forces at physical RCS sites create a bounded zero-net-force roll couple with actuator lag;
 - MPC predicts `mass + position + velocity + quaternion + angular velocity`, a 14-state 6-DOF model.
 
 The optimizer is a practical receding-horizon adaptation, not a verbatim reproduction of the paper's full free-final-time problem. It uses numerical dynamics linearization, trust regions, virtual control, conic thrust/gimbal/tilt/rate constraints, warm starts, and repeated replanning.
 
-The precise description is: **a coupled 6-DOF MuJoCo plant controlled by SCvx-inspired 6-DOF MPC, with a physical gimbaled-engine moment arm and bounded roll control.**
+The precise description is: **a coupled 6-DOF MuJoCo plant controlled by SCvx-inspired 6-DOF MPC, with fuel-dependent mass properties, a physical gimbaled-engine moment arm, and a lagged RCS roll couple.**
 
 ## Relationship to the paper
 
@@ -236,6 +243,7 @@ uv run pytest -q
 ├── pyproject.toml                    dependencies and command entry point
 ├── src/rocket_landing/
 │   ├── controller.py                 thrust bounds, gimbal cone, and fuel
+│   ├── mass_properties.py            dry stage and draining LOX/RP-1 model
 │   ├── mpc.py                        14-state SCvx MPC and nonlinear model
 │   ├── sim.py                        actuators, fallback, GUI, and rendering
 │   └── assets/rocket.xml             vehicle, pad, contacts, and visuals

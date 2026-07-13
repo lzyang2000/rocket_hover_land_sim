@@ -14,6 +14,8 @@ import time
 import cvxpy as cp
 import numpy as np
 
+from rocket_landing.mass_properties import MassProperties, RocketMassModel
+
 
 MASS = 0
 POSITION = slice(1, 4)
@@ -120,12 +122,13 @@ class MPCConfig:
     4_300_000.0,
     60_000.0,
   )
+  mass_model: RocketMassModel | None = None
   engine_position_body_m: tuple[float, float, float] = (0.0, 0.0, -20.10)
   alpha_kg_per_newton_second: float = 5.0e-4
   min_thrust_newtons: float = 144_000.0
   max_thrust_newtons: float = 576_000.0
   max_gimbal_radians: float = math.radians(20.0)
-  max_roll_torque_nm: float = 1_500_000.0
+  max_roll_torque_nm: float = 17_500.0
   max_tilt_radians: float = math.radians(30.0)
   max_angular_rate_rps: float = math.radians(35.0)
   minimum_com_height_m: float = 20.66
@@ -155,6 +158,13 @@ class SixDofMPC:
 
   def __init__(self, config: MPCConfig | None = None) -> None:
     self.config = config or MPCConfig()
+    self.mass_model = self.config.mass_model or RocketMassModel(
+      dry_mass_kg=self.config.dry_mass_kg,
+      initial_propellant_mass_kg=(
+        self.config.initial_mass_kg - self.config.dry_mass_kg
+      ),
+      initial_inertia_kgm2=self.config.initial_inertia_kgm2,
+    )
     self._state_scale = np.array(
       [
         self.config.initial_mass_kg,
@@ -213,9 +223,10 @@ class SixDofMPC:
     self._nominal_states = None
     self._nominal_controls = None
 
-  def _inertia(self, mass_kg: float) -> np.ndarray:
-    ratio = max(mass_kg, self.config.dry_mass_kg) / self.config.initial_mass_kg
-    return np.asarray(self.config.initial_inertia_kgm2, dtype=float) * ratio
+  def mass_properties(self, mass_kg: float) -> MassProperties:
+    """Return the fuel-dependent mass properties used by prediction."""
+
+    return self.mass_model.properties(mass_kg)
 
   def continuous_dynamics(self, state: np.ndarray, control: np.ndarray) -> np.ndarray:
     """Evaluate the paper-style 6-DOF rigid-body differential equation."""
@@ -239,10 +250,15 @@ class SixDofMPC:
     thrust_direction = gimbal_direction_body(gimbal)
     thrust_body = thrust * thrust_direction
     rotation = quaternion_to_matrix(quaternion)
-    inertia = self._inertia(mass)
+    mass_properties = self.mass_properties(mass)
+    inertia = mass_properties.inertia_at_com_kgm2
     angular_momentum = inertia * angular_velocity
+    engine_position_relative_com = (
+      np.asarray(self.config.engine_position_body_m, dtype=float)
+      - mass_properties.center_of_mass_body_m
+    )
     engine_moment = np.cross(
-      np.asarray(self.config.engine_position_body_m, dtype=float), thrust_body
+      engine_position_relative_com, thrust_body
     )
     roll_torque = float(
       np.clip(

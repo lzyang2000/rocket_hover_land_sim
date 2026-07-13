@@ -24,7 +24,7 @@ The control is
 u = (T,\delta_x,\delta_y,\tau_r),
 \]
 
-where `T` is thrust magnitude, `(delta_x, delta_y)` is the two-axis engine-gimbal command, and `tau_r` is bounded roll-control torque. A single engine can create pitch and yaw torque through its moment arm but cannot create torque about its own thrust axis, so `tau_r` represents separate roll-control authority.
+where `T` is thrust magnitude, `(delta_x, delta_y)` is the two-axis engine-gimbal command, and `tau_r` is the equivalent moment requested from the roll RCS. A single engine can create pitch and yaw torque through its moment arm but cannot create torque about its own thrust axis.
 
 ## 3. Nonlinear prediction model
 
@@ -41,9 +41,13 @@ The model uses
 \[
 \dot q=\frac{1}{2}q\otimes(0,\omega),
 \qquad
-J\dot\omega=r_{T,B}\times T\hat t_B+	au_r e_3
--\omega\times J\omega.
+J(m)\dot\omega=r_{T,B}(m)\times T\hat t_B+\tau_r e_3
+-\omega\times J(m)\omega.
 \]
+
+The position and velocity states are those of the current center of mass. Both
+`J(m)` and the engine-to-COM vector `r_{T,B}(m)` come from the shared draining-
+tank mass model.
 
 The gimbal direction is constructed from the two-component angle vector `delta`:
 
@@ -88,7 +92,9 @@ If the solver is unavailable, infeasible, numerically invalid, or exceeds the ac
 
 ## 6. Physical control application
 
-MuJoCo receives the engine force at the `thrust_origin` site rather than at the center of mass. The resulting moment arm creates physical pitch/yaw torque. Roll torque is applied as a bounded pure actuator torque. No unconstrained “magic” pitch/yaw assist torque remains.
+MuJoCo receives the engine force at the `thrust_origin` site rather than at the center of mass. The resulting fuel-dependent moment arm creates physical pitch/yaw torque. Roll is not injected as a pure torque: two equal and opposite tangential forces act at sites 1.75 m to either side of the body axis. Their net force is zero and their moments add about the body axis. Each modeled pod is limited to 5 kN, giving 17.5 kN m maximum roll moment, and the applied moment follows the command through a 0.10 s first-order response.
+
+The dry structure and effective LOX/RP-1 liquid columns determine mass, center of mass, and principal inertia. The same mass-property function is used by MuJoCo and the nonlinear MPC rollout. As the COM moves, the MPC recomputes the engine position relative to it.
 
 Manual mode uses a full SO(3) attitude controller and the same physical actuator allocation. It holds heading as well as body tilt, fixing the previous underdetermined-yaw behavior.
 
@@ -107,6 +113,8 @@ It retains the paper’s central practical structure: full quaternion rigid-body
 ## 8. Acceptance criteria
 
 - A perturbed rocket must remove yaw, pitch, and roll rates during powered flight.
+- The roll force pair must have zero net force and produce the requested bounded axial moment.
+- MuJoCo and MPC must agree on fuel-dependent COM and inertia.
 - Main-engine gimbal must remain inside its mechanical cone.
 - Thrust must remain inside the nonzero paper-style interval while lit.
 - Hover must recover position and attitude disturbances.

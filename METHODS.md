@@ -61,19 +61,41 @@ The nonlinear prediction model is
 \]
 
 \[
-J\dot\omega=r_{T,B}\times T\hat t_B+	au_r e_3
--\omega\times J\omega.
+J(m)\dot\omega=r_{T,B}(m)\times T\hat t_B+\tau_r e_3
+-\omega\times J(m)\omega.
 \]
 
-`R(q)` maps body-frame vectors into world coordinates. The engine pivot is approximately 20.1 m below the center of mass:
+`R(q)` maps body-frame vectors into world coordinates. The engine site is fixed approximately 20.1 m below the vehicle reference, while the center of mass `c_B(m)` moves with propellant depletion:
 
 \[
-r_{T,B}=(0,0,-20.1)\text{ m}.
+r_{T,B}(m)=(0,0,-20.1)-c_B(m).
 \]
+
+MuJoCo's free-joint translation is the vehicle reference position `r_O`, not the moving COM. Guidance therefore converts it using
+
+\[
+r_C=r_O+R(q)c_B,
+\qquad
+v_C=v_O+R(q)\left(\omega\times c_B+\dot c_B\right).
+\]
+
+The `dot c_B` term is evaluated from the mass-model derivative and current propellant flow. Hover and MPC states would otherwise report a false residual velocity while the liquid columns migrate.
 
 This moment arm is now present in both the optimizer and MuJoCo. The main-engine force is applied to the `thrust_origin` site through `mj_applyFT`; it is no longer applied at the center of mass. Gimbal commands therefore create physical pitch and yaw moments.
 
-A single axial engine cannot create roll torque. The bounded scalar `tau_r` models separate roll-control authority. It is deliberately explicit rather than hidden inside an unconstrained attitude-assist torque.
+A single axial engine cannot create roll torque. The bounded scalar `tau_r` is the equivalent command for two physical RCS forces. Sites at `(+1.75, 0, 15.25)` and `(-1.75, 0, 15.25)` m receive equal and opposite tangential forces:
+
+\[
+F_+=(0,F,0),\qquad F_-=(0,-F,0).
+\]
+
+Their translational forces cancel while their axial moments add:
+
+\[
+F_++F_-=0,\qquad \tau_r=2(1.75)F.
+\]
+
+The modeled force limit is 5 kN per pod, producing at most 17.5 kN m. A 0.10 s first-order actuator response prevents instantaneous torque steps. The MPC optimizes the equivalent bounded moment; MuJoCo applies the actual lagged force pair.
 
 MuJoCo remains the authoritative plant. The MPC model is propagated with RK4 over each prediction interval, and quaternions are normalized after propagation.
 
@@ -101,7 +123,15 @@ The mass equation is
 \alpha=5\times10^{-4}.
 \]
 
-MuJoCo mass and inertia are updated periodically as propellant burns. The MPC uses the same linear inertia-to-mass scaling as the plant.
+Mass properties are calculated from a calibrated dry stage and two effective liquid columns:
+
+- LOX: 72% of landing-reserve propellant, effective tank interval from `z=-2` to `z=14` m;
+- RP-1: 28%, effective tank interval from `z=-14` to `z=-2` m;
+- both columns use an effective 1.65 m radius and shorten toward their lower boundaries as propellant drains.
+
+The dry-stage COM and intrinsic inertia are solved so that the 30,000 kg initial condition has `c_B=0` and exactly matches the original `4.3e6, 4.3e6, 6.0e4 kg m^2` principal inertia. At half landing reserve the model gives approximately `c_z=-1.02 m` and `J_x=J_y=3.89e6 kg m^2`. At dry mass it gives approximately `c_z=-0.89 m` and `J=[3.71e6, 3.71e6, 4.77e4] kg m^2`.
+
+MuJoCo installs this moving inertial frame and principal inertia periodically as propellant burns. Hover guidance uses the corresponding COM position and velocity, while touchdown thresholds remain attached to the physical landing-leg/body reference. The MPC calls the same mass-property model and recomputes both `J(m)` and the engine-to-COM moment arm.
 
 `mj_setConst` evaluates the model at its reference pose, so the implementation preserves and restores the live free-joint position, quaternion, velocity, and simulation time around every mass-property recomputation. A regression test prevents the earlier teleport behavior from returning.
 
@@ -147,10 +177,10 @@ The mechanical gimbal constraint is the second-order cone
 \lVert\delta\rVert_2\leq20^\circ.
 \]
 
-Roll torque is bounded by
+Equivalent roll-RCS moment is bounded by
 
 \[
-|\tau_r|\leq1.5\times10^6\text{ N m}.
+|\tau_r|\leq1.75\times10^4\text{ N m}.
 \]
 
 The GUI direction pad represents the current world-direction demand. Telemetry separately reports the actual mechanical gimbal angle and body tilt.
@@ -237,7 +267,7 @@ e_R=\frac{1}{2}\left(R_d^TR-R^TR_d\right)^\vee,
 \tau_d=-K_Re_R-K_\omega\omega.
 \]
 
-Pitch and yaw torque demands are allocated to lateral engine force using the 20.1 m lever arm. Roll torque is sent to the bounded roll actuator. Axis-specific gains account for the large difference between pitch/yaw and axial inertia.
+Pitch and yaw torque demands are allocated to lateral engine force using the current engine-to-COM lever arm. Roll demand is sent to the bounded, lagged RCS force pair. Axis-specific gains account for the large difference between pitch/yaw and axial inertia.
 
 This full heading constraint fixes the former underdetermined-yaw behavior. The old controller aligned only the body vertical axis, so rotation about that axis had no restoring attitude error; the full SO(3) controller regulates all three rotational coordinates.
 
@@ -294,7 +324,7 @@ Yes, with an important terminology distinction:
 - The manual and fallback controllers regulate all three translation and all three rotation coordinates.
 - The MPC predicts and controls the complete 14-state mass/6-DOF rigid-body model.
 - Main-engine translation and pitch/yaw rotation are physically coupled through the engine moment arm.
-- Roll is controlled by an explicit bounded actuator because a single axial engine cannot generate roll moment.
+- Roll is controlled by an explicit opposed-force RCS couple because a single axial engine cannot generate roll moment.
 
 The project does not yet reproduce the paper's entire mission-level optimal-control problem, but it no longer uses a 3-DOF guidance law with an idealized pitch/yaw assist.
 
@@ -307,6 +337,8 @@ The test suite covers:
 - thrust, gimbal, tilt, ground, mass, and angular-rate constraints;
 - quaternion and rigid-body prediction dynamics;
 - physical engine-pivot pitch/yaw coupling;
+- shared fuel-dependent COM/inertia and engine-lever-arm calculations;
+- zero-net-force RCS roll-couple allocation and actuator lag;
 - full heading and axial-spin recovery;
 - virtual-control/nonlinear-defect diagnostics;
 - forced solver failure and fallback selection;
