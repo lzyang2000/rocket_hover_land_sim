@@ -50,7 +50,10 @@ FLAME_ORIGIN_BODY_Z_M = -20.10
 ENGINE_POSITION_BODY = np.array([0.0, 0.0, FLAME_ORIGIN_BODY_Z_M])
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 820
-APP_TITLE = "MuJoCo Powered Descent Lab v0.8 - 6-DOF SCvx MPC"
+THRUST_ARROW_MAX_LENGTH_M = 36.0
+THRUST_ARROW_MIN_WIDTH_M = 0.30
+THRUST_ARROW_MAX_WIDTH_M = 0.66
+APP_TITLE = "MuJoCo Powered Descent Lab v0.8.1 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -558,6 +561,36 @@ class RocketSimulation:
       self.data.qfrc_applied,
     )
 
+  def thrust_arrow_world(
+    self,
+  ) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Return plume-facing arrow endpoints and normalized thrust magnitude.
+
+    The arrow exits the engine bell like the visible plume. It therefore points
+    along the exhaust direction; the force applied to the vehicle points in the
+    opposite direction.
+    """
+
+    thrust = self.controller.thrust_magnitude_newtons()
+    maximum = self.controller.limits.max_thrust_newtons
+    if self.controller.engine_state is not EngineState.LIT or thrust <= 0.0:
+      return None
+
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    force_direction_world = rotation @ gimbal_direction_body(
+      self.engine_gimbal_radians
+    )
+    plume_direction_world = -force_direction_world
+    magnitude_fraction = float(np.clip(thrust / maximum, 0.0, 1.0))
+    origin = self.data.site_xpos[self.thrust_site_id].copy()
+    tip = (
+      origin
+      + plume_direction_world
+      * THRUST_ARROW_MAX_LENGTH_M
+      * magnitude_fraction
+    )
+    return origin, tip, magnitude_fraction
+
   def _update_model_mass(self, *, force: bool = False) -> None:
     current_mass = self.controller.wet_mass_kg
     if not force and math.isclose(current_mass, self.last_applied_mass, abs_tol=1e-9):
@@ -685,6 +718,7 @@ class RocketSimulation:
         f"VZ {velocity[2]:6.1f} m/s"
       ),
       f"{mode_line}    {control_line}",
+      "3-D arrow: plume direction, vehicle thrust is opposite",
       "H hover | L auto-land | arrows altitude/throttle | WASD target/thrust | K kill | R reset",
     )
 
@@ -1308,6 +1342,7 @@ class RocketWindow:
       mujoco.mjtCatBit.mjCAT_ALL.value,
       self.scene,
     )
+    self._append_thrust_arrow()
     mujoco.mjr_render(viewport, self.scene, self.context)
     telemetry = list(self.simulation.telemetry_lines())
     if time.monotonic() < self.status_until:
@@ -1321,6 +1356,46 @@ class RocketWindow:
       self.context,
     )
     self._draw_button(framebuffer_width, framebuffer_height)
+
+  def _append_thrust_arrow(self) -> None:
+    """Append the live thrust visualization to the current MuJoCo scene."""
+
+    arrow = self.simulation.thrust_arrow_world()
+    if arrow is None or self.scene.ngeom >= self.scene.maxgeom:
+      return
+
+    origin, tip, magnitude_fraction = arrow
+    rgba = np.array(
+      [
+        1.0 - 0.70 * magnitude_fraction,
+        0.45 + 0.45 * magnitude_fraction,
+        0.08 + 0.92 * magnitude_fraction,
+        0.96,
+      ],
+      dtype=np.float32,
+    )
+    width = (
+      THRUST_ARROW_MIN_WIDTH_M
+      + (THRUST_ARROW_MAX_WIDTH_M - THRUST_ARROW_MIN_WIDTH_M)
+      * magnitude_fraction
+    )
+    geom = self.scene.geoms[self.scene.ngeom]
+    mujoco.mjv_initGeom(
+      geom,
+      mujoco.mjtGeom.mjGEOM_ARROW.value,
+      np.zeros(3, dtype=np.float64),
+      origin,
+      np.eye(3, dtype=np.float64).reshape(-1),
+      rgba,
+    )
+    mujoco.mjv_connector(
+      geom,
+      mujoco.mjtGeom.mjGEOM_ARROW.value,
+      width,
+      origin,
+      tip,
+    )
+    self.scene.ngeom += 1
 
   def run(self) -> None:
     previous_time = time.monotonic()

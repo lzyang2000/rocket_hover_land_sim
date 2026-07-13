@@ -19,6 +19,7 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 - Fuel consumption and changing body mass/inertia.
 - Keyboard and clickable GUI flight controls.
 - Live directional indicators and a thrust slider that follow automatic guidance commands.
+- Live 3-D engine arrow whose direction follows gimbal and whose length follows thrust magnitude.
 - Three-dimensional hover/position hold.
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
 - Deterministic 6-DOF fallback control if an MPC solve fails.
@@ -70,7 +71,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.8`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.8.1`.
 
 ## Controls
 
@@ -107,6 +108,12 @@ The mapping is in fixed world axes, not camera-relative axes. Rotating the camer
 In manual mode, click or drag the slider to command any throttle from 20% to 80%. Moving the slider automatically ignites an engine that is still off.
 
 During hover and auto-land, the slider becomes read-only and changes color to indicate automatic ownership. Its knob follows the throttle actually commanded by guidance, including mass compensation and braking.
+
+### 3-D thrust arrow
+
+A colored arrow is anchored at the center engine and follows the actual gimbal command in manual, hover, and auto-land modes. Arrow length and thickness scale with applied thrust, while its color moves from orange toward cyan as thrust increases. It disappears immediately when the engine is off or killed.
+
+The arrow is deliberately drawn outward through the visible plume, so it shows the nozzle/exhaust direction. The reaction force applied to the rocket points in the opposite direction.
 
 ## Operating modes
 

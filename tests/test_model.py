@@ -6,11 +6,12 @@ import mujoco
 import numpy as np
 import pytest
 
-from rocket_landing.mpc import MPCResult
+from rocket_landing.mpc import MPCResult, gimbal_direction_body
 from rocket_landing.sim import (
   ROCKET_DIAMETER_M,
   ROCKET_HEIGHT_M,
   ROCKET_LANDED_COM_Z_M,
+  THRUST_ARROW_MAX_LENGTH_M,
   RocketSimulation,
   RocketWindow,
   model_path,
@@ -56,6 +57,69 @@ def test_headless_rollout_lifts_with_vertical_thrust() -> None:
     previous_altitude = altitude
   assert simulation.data.qpos[2] > initial_altitude + 20.0
   assert min(altitude_changes) > -0.05
+
+
+def test_thrust_arrow_tracks_engine_magnitude_and_gimbal_direction() -> None:
+  simulation = RocketSimulation()
+  assert simulation.thrust_arrow_world() is None
+
+  simulation.controller.ignite()
+  minimum_arrow = simulation.thrust_arrow_world()
+  assert minimum_arrow is not None
+  minimum_origin, minimum_tip, minimum_fraction = minimum_arrow
+  minimum_vector = minimum_tip - minimum_origin
+  assert np.linalg.norm(minimum_vector) == pytest.approx(
+    THRUST_ARROW_MAX_LENGTH_M * minimum_fraction
+  )
+  assert minimum_vector / np.linalg.norm(minimum_vector) == pytest.approx(
+    np.array([0.0, 0.0, -1.0])
+  )
+
+  simulation.controller.throttle = simulation.controller.limits.max_throttle
+  simulation.engine_gimbal_radians[:] = (math.radians(6.0), math.radians(-3.0))
+  maximum_arrow = simulation.thrust_arrow_world()
+  assert maximum_arrow is not None
+  maximum_origin, maximum_tip, maximum_fraction = maximum_arrow
+  maximum_vector = maximum_tip - maximum_origin
+  rotation = simulation.data.xmat[simulation.rocket_body_id].reshape(3, 3)
+  expected_plume_direction = -rotation @ gimbal_direction_body(
+    simulation.engine_gimbal_radians
+  )
+  assert maximum_fraction == pytest.approx(1.0)
+  assert np.linalg.norm(maximum_vector) == pytest.approx(
+    THRUST_ARROW_MAX_LENGTH_M
+  )
+  assert maximum_vector / np.linalg.norm(maximum_vector) == pytest.approx(
+    expected_plume_direction
+  )
+
+
+def test_thrust_arrow_is_appended_only_while_engine_is_lit() -> None:
+  window = RocketWindow.__new__(RocketWindow)
+  window.simulation = RocketSimulation()
+  window.scene = mujoco.MjvScene(window.simulation.model, maxgeom=100)
+  camera = mujoco.MjvCamera()
+  option = mujoco.MjvOption()
+  mujoco.mjv_defaultCamera(camera)
+  mujoco.mjv_defaultOption(option)
+
+  mujoco.mjv_updateScene(
+    window.simulation.model,
+    window.simulation.data,
+    option,
+    None,
+    camera,
+    mujoco.mjtCatBit.mjCAT_ALL.value,
+    window.scene,
+  )
+  base_geom_count = window.scene.ngeom
+  window._append_thrust_arrow()
+  assert window.scene.ngeom == base_geom_count
+
+  window.simulation.controller.ignite()
+  window._append_thrust_arrow()
+  assert window.scene.ngeom == base_geom_count + 1
+  assert window.scene.geoms[base_geom_count].type == mujoco.mjtGeom.mjGEOM_ARROW
 
 
 def test_powered_six_dof_controller_removes_axial_spin_and_tilt_rates() -> None:
