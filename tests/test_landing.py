@@ -1,5 +1,6 @@
 import mujoco
 import numpy as np
+import pytest
 
 from rocket_landing.controller import EngineState
 from rocket_landing.sim import (
@@ -51,6 +52,58 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
   assert simulation.controller.fuel_mass_kg > 0.0
 
 
+def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> None:
+  simulation = RocketSimulation()
+  rate_by_height = {
+    40.0: 12.0,
+    20.0: 8.0,
+    15.0: 5.0,
+    8.0: 3.0,
+    3.0: 1.5,
+    1.5: 0.6,
+    0.5: 0.25,
+  }
+  for height, expected_rate in rate_by_height.items():
+    simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + height
+    assert simulation._descent_rate_mps() == expected_rate
+
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 15.0
+  simulation.data.qvel[:] = 0.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.hover_target_position = simulation.landing_center_of_mass_position()
+  simulation.hover_target_position[2] += 15.0
+  simulation._update_landing_guidance()
+
+  assert simulation.hover_target_velocity == pytest.approx(
+    np.array([0.0, 0.0, -5.0])
+  )
+
+  flight = RocketSimulation()
+  flight.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 40.0
+  flight.data.qvel[:] = 0.0
+  mujoco.mj_forward(flight.model, flight.data)
+  assert flight.start_landing()
+  peak_descent_speed = 0.0
+  for _ in range(4_000):
+    flight.step()
+    peak_descent_speed = max(
+      peak_descent_speed, -float(flight.data.qvel[2])
+    )
+    if flight.landing_phase is LandingPhase.COMPLETE:
+      break
+
+  cutoff_height = float(
+    flight.data.qpos[2] - ROCKET_LANDED_COM_Z_M
+  )
+  assert flight.landing_phase is LandingPhase.COMPLETE
+  assert peak_descent_speed > 10.0
+  assert cutoff_height > 0.05
+  assert -0.35 <= float(flight.data.qvel[2]) <= 0.10
+
+
 def test_scvx_mpc_flies_terminal_descent_and_cuts_off() -> None:
   simulation = RocketSimulation(enable_mpc=True)
   simulation.data.qpos[0:3] = (
@@ -80,4 +133,6 @@ def test_scvx_mpc_flies_terminal_descent_and_cuts_off() -> None:
   assert saw_valid_mpc_command
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
   assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.10
-  assert np.linalg.norm(simulation.data.qvel[0:2]) < 0.10
+  assert np.linalg.norm(
+    simulation.center_of_mass_velocity_world()[0:2]
+  ) < 0.10

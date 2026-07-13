@@ -273,7 +273,7 @@ This full heading constraint fixes the former underdetermined-yaw behavior. The 
 
 ## 9. Hover and auto-land references
 
-Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD moves the horizontal target, and Up/Down moves its altitude.
+Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD moves the horizontal target, and Up/Down moves its altitude. Auto-land additionally supplies a nonzero vertical target velocity so the controller tracks a deliberate descent profile rather than chasing a moving position target whose nominal velocity is incorrectly zero.
 
 Auto-land supplies references through two phases:
 
@@ -283,13 +283,17 @@ The controller moves above the pad and stabilizes position, velocity, attitude, 
 
 ### Descend
 
-The target altitude moves downward at:
+The target altitude and vertical-velocity reference descend at:
 
-- 2.0 m/s above 10 m;
-- 1.0 m/s from 3 to 10 m;
-- 0.35 m/s below 3 m.
+- 12 m/s above 30 m;
+- 8 m/s from 18 to 30 m;
+- 5 m/s from 10 to 18 m;
+- 3 m/s from 5 to 10 m;
+- 1.5 m/s from 2.5 to 5 m;
+- 0.6 m/s from 1 to 2.5 m;
+- 0.25 m/s below 1 m.
 
-Engine cutoff occurs only near the landed center-of-mass height with small horizontal error and velocity and a bounded descent rate. MuJoCo then resolves landing-leg contact and settling.
+The high-altitude bands create a visibly forceful approach, while the final bands reserve enough altitude for powered braking. Engine cutoff occurs only near the landed center-of-mass height with small horizontal error, less than 0.10 m/s horizontal speed, and a bounded descent rate. MuJoCo then resolves landing-leg contact and settling.
 
 The phase logic is intentionally separate from the optimizer. It provides interpretable reference generation while the MPC handles coupled six-degree-of-freedom tracking and actuator constraints.
 

@@ -71,7 +71,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.1`.
 
 ## Controls
 
@@ -139,13 +139,17 @@ Telemetry reports `SCVX MPC: OPTIMAL` and the latest solve time when the optimiz
 
 Press `L` or click `AUTO LAND`.
 
-The state machine supplies moving reference states to the same 6-DOF MPC. It first holds altitude while braking and aligning over the pad center, then descends at:
+The state machine supplies moving position and velocity references to the same 6-DOF MPC. It first holds altitude while braking and aligning over the pad center, then uses an aggressive approach with terminal braking:
 
-- 2.0 m/s above 10 m;
-- 1.0 m/s between 3 and 10 m;
-- 0.35 m/s near touchdown.
+- 12 m/s above 30 m;
+- 8 m/s from 18 to 30 m;
+- 5 m/s from 10 to 18 m;
+- 3 m/s from 5 to 10 m;
+- 1.5 m/s from 2.5 to 5 m;
+- 0.6 m/s from 1 to 2.5 m;
+- 0.25 m/s inside the final meter.
 
-The engine cuts directly to zero only when horizontal error and speed are small and the rocket is within 10 cm of its landing body height.
+The engine cuts directly to zero only when horizontal error is small, horizontal speed is below 0.10 m/s, vertical speed is inside the touchdown window, and the rocket is within 10 cm of its landing body height.
 
 ## Falcon 9-like dimensions and dynamics
 

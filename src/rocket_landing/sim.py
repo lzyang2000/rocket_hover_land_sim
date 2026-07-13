@@ -59,7 +59,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.1 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -155,6 +155,7 @@ class RocketSimulation:
     self.roll_control_torque_nm = 0.0
     self.hover_enabled = False
     self.hover_target_position = np.zeros(3, dtype=float)
+    self.hover_target_velocity = np.zeros(3, dtype=float)
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
     self.reset()
@@ -165,6 +166,7 @@ class RocketSimulation:
     mujoco.mj_resetData(self.model, self.data)
     self.hover_enabled = False
     self.hover_target_position = self.data.qpos[0:3].copy()
+    self.hover_target_velocity[:] = 0.0
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
     self.last_mass_update_time = -math.inf
@@ -197,6 +199,7 @@ class RocketSimulation:
       return False
     self._invalidate_mpc_solution()
     self.hover_target_position = self.center_of_mass_position_world()
+    self.hover_target_velocity[:] = 0.0
     self.hover_enabled = True
     self.landing_phase = LandingPhase.INACTIVE
     self._update_hover_controller(force=True)
@@ -205,6 +208,7 @@ class RocketSimulation:
   def disable_hover(self) -> None:
     self._invalidate_mpc_solution()
     self.hover_enabled = False
+    self.hover_target_velocity[:] = 0.0
     self.controller.center_lateral()
     if self.landing_phase not in (LandingPhase.COMPLETE, LandingPhase.ABORTED):
       self.landing_phase = LandingPhase.INACTIVE
@@ -300,6 +304,7 @@ class RocketSimulation:
     self.hover_target_position = np.array(
       [0.0, 0.0, self.landing_staging_altitude], dtype=float
     )
+    self.hover_target_velocity[:] = 0.0
     self.hover_enabled = True
     self.landing_phase = LandingPhase.ALIGN
     self._update_hover_controller(force=True)
@@ -310,15 +315,24 @@ class RocketSimulation:
       self._invalidate_mpc_solution()
       self.landing_phase = LandingPhase.INACTIVE
       self.hover_target_position = self.center_of_mass_position_world()
+      self.hover_target_velocity[:] = 0.0
       self.hover_enabled = True
 
   def _descent_rate_mps(self) -> float:
     height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+    if height > 30.0:
+      return 12.0
+    if height > 18.0:
+      return 8.0
     if height > 10.0:
-      return 2.0
-    if height > 3.0:
-      return 1.0
-    return 0.35
+      return 5.0
+    if height > 5.0:
+      return 3.0
+    if height > 2.5:
+      return 1.5
+    if height > 1.0:
+      return 0.6
+    return 0.25
 
   def _update_landing_guidance(self) -> None:
     if not self.landing_active:
@@ -326,6 +340,7 @@ class RocketSimulation:
     if self.controller.engine_state is not EngineState.LIT:
       self._invalidate_mpc_solution()
       self.hover_enabled = False
+      self.hover_target_velocity[:] = 0.0
       self.landing_phase = LandingPhase.ABORTED
       return
 
@@ -338,6 +353,7 @@ class RocketSimulation:
     horizontal_speed = float(np.linalg.norm(velocity[0:2]))
 
     if self.landing_phase is LandingPhase.ALIGN:
+      self.hover_target_velocity[:] = 0.0
       self.hover_target_position[:] = (
         landed_com_position[0],
         landed_com_position[1],
@@ -354,22 +370,30 @@ class RocketSimulation:
 
     if self.landing_phase is LandingPhase.DESCEND:
       self.hover_target_position[0:2] = landed_com_position[0:2]
-      self.hover_target_position[2] = max(
+      previous_target_z = float(self.hover_target_position[2])
+      requested_rate = self._descent_rate_mps()
+      next_target_z = max(
         landed_com_position[2],
-        self.hover_target_position[2]
-        - self._descent_rate_mps() * self.model.opt.timestep,
+        previous_target_z - requested_rate * self.model.opt.timestep,
+      )
+      self.hover_target_position[2] = next_target_z
+      self.hover_target_velocity[:] = 0.0
+      self.hover_target_velocity[2] = -max(
+        (previous_target_z - next_target_z) / self.model.opt.timestep,
+        0.0,
       )
       height = float(body_position[2] - LANDING_PAD_POSITION[2])
       ready_for_cutoff = (
         height < 0.10
         and -0.35 <= body_velocity[2] <= 0.10
         and horizontal_error < 0.20
-        and horizontal_speed < 0.15
+        and horizontal_speed < 0.10
       )
       if ready_for_cutoff:
         self._invalidate_mpc_solution()
         self.controller.kill_engine()
         self.hover_enabled = False
+        self.hover_target_velocity[:] = 0.0
         self.controller.center_lateral()
         self.landing_phase = LandingPhase.COMPLETE
 
@@ -389,8 +413,10 @@ class RocketSimulation:
     position = self.center_of_mass_position_world()
     velocity = self.center_of_mass_velocity_world()
     position_error = self.hover_target_position - position
+    velocity_error = self.hover_target_velocity - velocity
     desired_acceleration = (
-      HOVER_POSITION_KP * position_error - HOVER_VELOCITY_KD * velocity
+      HOVER_POSITION_KP * position_error
+      + HOVER_VELOCITY_KD * velocity_error
     )
     required_force = self.controller.wet_mass_kg * (
       desired_acceleration - self.model.opt.gravity
@@ -437,7 +463,7 @@ class RocketSimulation:
   def _mpc_target_state(self) -> np.ndarray:
     target = self._mpc_state()
     target[POSITION] = self.hover_target_position
-    target[VELOCITY] = 0.0
+    target[VELOCITY] = self.hover_target_velocity
     target[QUATERNION] = (1.0, 0.0, 0.0, 0.0)
     target[ANGULAR_VELOCITY] = 0.0
     return target
@@ -826,7 +852,8 @@ class RocketSimulation:
     elif self.landing_phase is LandingPhase.DESCEND:
       mode_line = (
         "MODE AUTO LAND: DESCEND    "
-        f"TARGET Z {self.hover_target_position[2]:.1f} m"
+        f"TARGET Z {self.hover_target_position[2]:.1f} m    "
+        f"TARGET VZ {self.hover_target_velocity[2]:.2f} m/s"
       )
     elif self.landing_phase is LandingPhase.COMPLETE:
       mode_line = "MODE LANDED"
