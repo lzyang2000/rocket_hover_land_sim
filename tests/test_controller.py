@@ -64,6 +64,28 @@ def test_engine_kill_jumps_directly_to_zero_and_requires_reset() -> None:
   assert controller.kill_engine()
   assert controller.engine_state is EngineState.SHUTDOWN
   assert controller.thrust_magnitude_newtons() == 0.0
+
+
+def test_ballistic_coast_can_relight_but_kill_remains_permanent() -> None:
+  controller = RocketController()
+  controller.ignite()
+  controller.throttle = 0.55
+
+  assert controller.begin_coast()
+  assert controller.engine_state is EngineState.COAST
+  assert controller.thrust_magnitude_newtons() == 0.0
+  fuel_before = controller.fuel_mass_kg
+  assert controller.consume_fuel(2.0) == 0.0
+  assert controller.fuel_mass_kg == fuel_before
+
+  assert controller.relight(throttle=controller.limits.max_throttle)
+  assert controller.engine_state is EngineState.LIT
+  assert controller.throttle == controller.limits.max_throttle
+  assert controller.begin_coast()
+  assert controller.kill_engine()
+  assert controller.engine_state is EngineState.SHUTDOWN
+  assert not controller.relight()
+  assert not controller.ignite()
   assert not controller.ignite()
   assert not controller.kill_engine()
   controller.reset()

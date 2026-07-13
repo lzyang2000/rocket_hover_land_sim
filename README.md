@@ -25,6 +25,7 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 - Live 3-D engine arrow whose direction follows gimbal and whose length follows thrust magnitude.
 - Three-dimensional hover/position hold.
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
+- Relightable high-altitude ballistic coast with a dynamic landing-burn gate.
 - Automatic landing takeover at 1.05 times the estimated landing-fuel reserve.
 - Deterministic 6-DOF fallback control if an MPC solve fails.
 - A controller-owner badge that reports `MPC ACTIVE`, `TERMINAL ACTIVE`,
@@ -87,7 +88,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.20`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.21`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -125,7 +126,7 @@ The mapping is in fixed world axes, not camera-relative axes. Rotating the camer
 
 In manual mode, click or drag the slider to command any throttle from 20% to 80%. Moving the slider automatically ignites an engine that is still off.
 
-During hover and auto-land, the slider becomes read-only and changes color to indicate automatic ownership. Its knob follows the throttle actually commanded by guidance, including mass compensation and braking.
+During hover and auto-land, the slider becomes read-only and changes color to indicate automatic ownership. Its knob follows the throttle actually commanded by guidance, including mass compensation and braking. During ballistic coast it moves to zero and reads `OFF`; the engine remains armed for an automatic relight.
 
 When the engine is off, killed, fuel-depleted, or shut down after landing, the slider returns to its zero position and reads `THRUST 0.0% OFF` rather than retaining the last powered throttle command.
 
@@ -165,7 +166,13 @@ Synchronous mode can pause rendering and input briefly during a solve—typicall
 
 Press `L` or click `AUTO LAND`.
 
-The state machine supplies moving position and velocity references to the 6-DOF MPC. Normal auto-land first climbs or holds at a staging height at least 25 m above the pad. If LAND is clicked during a rapid manual ascent, staging is raised to the predicted minimum-thrust braking apex; this captures the upward trajectory instead of requiring the rocket to overshoot and later return to the obsolete click altitude. ALIGN uses a four-metre horizontal lead through 18 m altitude; above that, the lead grows by 0.15 m per additional metre and is capped at 8 m. The rocket must complete the lateral capture within 2 m, reduce horizontal speed below 1.0 m/s, and settle within 2 m and 1.5 m/s of the staging altitude before DESCEND begins. Alignment is therefore completed high rather than deferred into the final approach. Fuel-reserve takeover keeps the current altitude unless the current upward stopping trajectory is necessarily higher. It then uses an aggressive approach with terminal braking:
+The state machine supplies moving position and velocity references to the 6-DOF MPC. Normal auto-land first climbs or holds at a staging height at least 25 m above the pad. If LAND is clicked during a rapid manual ascent, staging is raised to the predicted minimum-thrust braking apex; this captures the upward trajectory instead of requiring the rocket to overshoot and later return to the obsolete click altitude. ALIGN uses a four-metre horizontal lead through 18 m altitude; above that, the lead grows by 0.15 m per additional metre and is capped at 8 m. The rocket must complete the lateral capture within 2 m, reduce horizontal speed below 1.0 m/s, and settle within 2 m and 1.5 m/s of the staging altitude before descent begins. Alignment is therefore completed high rather than deferred into the final approach. Fuel-reserve takeover keeps the current altitude unless the current upward stopping trajectory is necessarily higher.
+
+If alignment finishes above 32 m while the stage is nearly upright and dynamically quiet, auto-land enters `COAST`: main-engine thrust and fuel flow go to zero, the GUI reports `LAND: COAST`, the thrust slider moves to zero, and the roll RCS remains available. The engine automatically relights at maximum commanded throttle when the current stopping-distance gate is reached. After a long coast, descent follows an energy-based speed corridor rather than immediately braking to the fixed 12 m/s band; this lets a 1,000 m vacuum drop peak near 90 m/s, relight around 590 m, and progressively brake to landing without wasting fuel in a several-hundred-metre powered hover-like descent. Tilt above 5°, angular rate above 0.25 rad/s, lateral error above 2.75 m, or horizontal speed above 1.5 m/s commands an early relight. Low-altitude landings skip coast entirely. `KILL ENGINE` remains a permanent shutdown and is deliberately separate from this armed coast state.
+
+This high-altitude result is a vacuum rigid-body demonstration. Aerodynamic drag, wind, grid-fin authority, and atmospheric attitude stabilization are not yet modeled, so it should not be read as a realistic Falcon 9 entry simulation.
+
+After relight, guidance uses an aggressive approach with terminal braking:
 
 - 12 m/s above 30 m;
 - 8 m/s from 18 to 30 m;
@@ -181,11 +188,11 @@ Inside the optimizer, a nonzero reference velocity now advances the reference po
 
 The four landing legs remain folded upward against the fuselage during reset, manual flight, hover, ALIGN, and descent above the 7 m terminal handoff. Entering terminal descent commands a latched 1.25 s deployment down and outward; it continues even if landing guidance is cancelled after deployment begins. The same moving MuJoCo geoms provide the visible legs and their collision contacts, and telemetry reports `LEGS STOWED`, deployment percentage, or `LEGS DEPLOYED`. Reset is the only command that folds them again. An invisible fixed support under the engine section holds the stowed vehicle at startup, then disables permanently at actual liftoff or when auto-land begins.
 
-While the engine is lit outside auto-land, the simulator estimates the propellant needed to align, descend through this profile, and brake excess velocity. If fuel remaining falls to `1.05 ×` that estimate while the rocket is above the end-burn cutoff height, auto-land takes over once and latches. A reserve takeover aligns at the current altitude rather than climbing to the normal staging height. The estimator no longer caps alignment at eight seconds: it includes lateral translation and braking time, upward-apex braking, four seconds of capture/settling allowance, a 20% descent-time margin, a 20% control-impulse margin, and a fixed 400 kg terminal reserve. A height- and offset-dependent minimum controllable reserve prevents a mathematically small estimate from requesting a landing after the current controller's safe takeover window has passed. This remains a conservative heuristic—not a certified propellant-to-go result from the MPC.
+While the engine is lit outside auto-land, the simulator estimates the propellant needed to align, perform only the powered part of descent below the predicted coast ignition point, and brake excess velocity. If fuel remaining falls to `1.05 ×` that estimate while the rocket is above the end-burn cutoff height, auto-land takes over once and latches. A reserve takeover aligns at the current altitude rather than climbing to the normal staging height. The retuned estimate uses 2.5 seconds of capture/settling allowance, 10% descent-time and control-impulse margins, and a 250 kg terminal reserve. Its controllability floor now charges relatively little for coastable altitude but more strongly for lateral offset, which is the condition that actually destabilizes low-fuel capture in rollout tests. In the standard `(4, -3, 15 m)` regression state, takeover is about 7.48 tonnes rather than 7.76 tonnes; an aligned 1,000 m vacuum descent triggers around 6.5 tonnes. This remains a controller-specific heuristic—not a certified propellant-to-go result from the MPC.
 
 To prevent low-altitude hunting, the physical gimbal follows commands through an actuator lag and is limited to 3° below 5 m, 1.5° below 2.5 m, and 0.75° in the final meter. Very small terminal commands enter a 0.15° deadband.
 
-The engine cuts directly to zero once horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, vertical speed is between -0.50 and +0.15 m/s, and the rocket is within 15 cm of its landing body height. These wider end-burn tolerances avoid low-altitude hunting; the legs and pad friction then settle the residual motion instead of the engine hovering close to the ground and repeatedly correcting it.
+The engine normally cuts directly to zero once horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, vertical speed is between -0.50 and +0.15 m/s, and the rocket is within 15 cm of its landing body height. Fuel-reserve takeover uses an emergency envelope of 1.0 m, 0.60 m/s, and 30 cm so it does not spend its remaining reserve hovering for cosmetic pad precision. The legs and pad friction settle the residual motion.
 
 ## Falcon 9-like dimensions and dynamics
 
@@ -252,7 +259,8 @@ Implemented from the 2013 and 2020 papers:
 
 Not yet implemented:
 
-- free ignition and free final time;
+- optimizer-selected free ignition and free final time (auto-land uses an
+  explicit stopping-distance ignition gate);
 - atmospheric lift/drag and angle-of-attack state-triggered constraints;
 - exact first-order-hold discretization matrices;
 - formal convergence or global-optimality guarantees.
@@ -306,7 +314,7 @@ Initial hover is about 40.9%. Hold Up or drag the thrust slider above that point
 
 ### The engine will not restart
 
-After `KILL ENGINE`, restart is intentionally latched out. Press `R` for a new flight.
+After `KILL ENGINE`, restart is intentionally latched out. Press `R` for a new flight. The automatic `COAST` phase is different: it keeps the engine armed and relights without user input.
 
 ### Manual WASD appears to move in an unexpected screen direction
 

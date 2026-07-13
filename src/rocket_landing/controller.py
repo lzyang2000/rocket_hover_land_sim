@@ -12,6 +12,7 @@ import numpy as np
 class EngineState(Enum):
   OFF = auto()
   LIT = auto()
+  COAST = auto()
   SHUTDOWN = auto()
   FUEL_OUT = auto()
 
@@ -71,10 +72,31 @@ class RocketController:
     )
     return True
 
+  def begin_coast(self) -> bool:
+    """Temporarily stop thrust while keeping the engine armed to relight."""
+
+    if self.engine_state is not EngineState.LIT:
+      return False
+    self.engine_state = EngineState.COAST
+    return True
+
+  def relight(self, *, throttle: float | None = None) -> bool:
+    """Relight an armed coasting engine without weakening permanent kill."""
+
+    if self.engine_state is not EngineState.COAST or self.fuel_mass_kg <= 0.0:
+      return False
+    if throttle is not None:
+      self.throttle = float(throttle)
+    self.throttle = float(
+      np.clip(self.throttle, self.limits.min_throttle, self.limits.max_throttle)
+    )
+    self.engine_state = EngineState.LIT
+    return True
+
   def kill_engine(self) -> bool:
     """Discontinuously transition from valid positive thrust to zero."""
 
-    if self.engine_state is not EngineState.LIT:
+    if self.engine_state not in (EngineState.LIT, EngineState.COAST):
       return False
     self.engine_state = EngineState.SHUTDOWN
     return True

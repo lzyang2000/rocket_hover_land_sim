@@ -262,6 +262,129 @@ def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> No
   assert -0.50 <= float(flight.data.qvel[2]) <= 0.15
 
 
+def test_high_altitude_auto_land_coasts_without_fuel_then_relights() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 40.0
+  simulation.data.qvel[:] = 0.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  assert simulation.start_landing()
+  phases_seen = set()
+  coast_fuel = None
+  relight_height = None
+  for _ in range(7_000):
+    simulation.step()
+    phases_seen.add(simulation.landing_phase)
+    if simulation.landing_phase is LandingPhase.COAST:
+      assert simulation.controller.engine_state is EngineState.COAST
+      if coast_fuel is None:
+        coast_fuel = simulation.controller.fuel_mass_kg
+      assert simulation.controller.fuel_mass_kg == pytest.approx(coast_fuel)
+      assert simulation.controller.thrust_magnitude_newtons() == 0.0
+    elif (
+      coast_fuel is not None
+      and relight_height is None
+      and simulation.landing_phase is LandingPhase.DESCEND
+    ):
+      relight_height = float(
+        simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M
+      )
+      assert simulation.controller.engine_state is EngineState.LIT
+    if simulation.landing_phase is LandingPhase.COMPLETE:
+      break
+
+  assert LandingPhase.COAST in phases_seen
+  assert relight_height is not None
+  assert 20.0 < relight_height < 35.0
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+  assert simulation.controller.engine_state is EngineState.SHUTDOWN
+
+
+def test_1000m_ballistic_coast_uses_energy_corridor_and_lands() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 1_000.0
+  simulation.data.qvel[:] = 0.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  assert 6_000.0 < simulation.fuel_takeover_threshold_kg() < 7_000.0
+  simulation.controller.fuel_mass_kg = 6_500.0
+  simulation._update_model_mass(force=True)
+  mujoco.mj_forward(simulation.model, simulation.data)
+  takeover_threshold = simulation.fuel_takeover_threshold_kg()
+  assert takeover_threshold == pytest.approx(6_500.0)
+  simulation.controller.fuel_mass_kg = takeover_threshold
+  simulation.controller.ignite()
+  simulation._check_fuel_reserve_takeover()
+  assert simulation.fuel_takeover_active
+  assert simulation.landing_phase is LandingPhase.ALIGN
+  peak_descent_speed = 0.0
+  relight_height = None
+  for _ in range(12_000):
+    previous_phase = simulation.landing_phase
+    simulation.step()
+    peak_descent_speed = max(
+      peak_descent_speed,
+      -float(simulation.data.qvel[2]),
+    )
+    if (
+      previous_phase is LandingPhase.COAST
+      and simulation.landing_phase is LandingPhase.DESCEND
+    ):
+      relight_height = float(
+        simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M
+      )
+      assert simulation._descent_rate_mps() > 60.0
+    if simulation.landing_phase is LandingPhase.COMPLETE:
+      break
+
+  assert relight_height is not None
+  assert 500.0 < relight_height < 700.0
+  assert peak_descent_speed > 80.0
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+  assert simulation.controller.fuel_mass_kg > 1_500.0
+
+
+def test_low_altitude_landing_skips_ballistic_coast() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 15.0
+  simulation.data.qvel[:] = 0.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  assert simulation.start_landing(fuel_takeover=True)
+  phases_seen = set()
+  for _ in range(7_000):
+    simulation.step()
+    phases_seen.add(simulation.landing_phase)
+    if simulation.landing_phase is LandingPhase.COMPLETE:
+      break
+
+  assert LandingPhase.COAST not in phases_seen
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+
+
+def test_unsafe_coast_attitude_triggers_early_relight() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 60.0
+  angle = math.radians(6.0)
+  simulation.data.qpos[3:7] = (
+    math.cos(angle / 2.0),
+    math.sin(angle / 2.0),
+    0.0,
+    0.0,
+  )
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  assert simulation.controller.begin_coast()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.COAST
+
+  simulation._update_landing_guidance()
+
+  assert simulation.landing_phase is LandingPhase.DESCEND
+  assert simulation.controller.engine_state is EngineState.LIT
+  assert simulation.controller.throttle == simulation.controller.limits.max_throttle
+
+
 def test_fuel_reserve_takeover_triggers_at_105_percent_and_latches() -> None:
   simulation = RocketSimulation()
   simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 40.0
@@ -305,7 +428,7 @@ def test_real_fuel_reserve_takeover_keeps_enough_fuel_to_land() -> None:
   mujoco.mj_forward(simulation.model, simulation.data)
 
   takeover_threshold = simulation.fuel_takeover_threshold_kg()
-  assert 7_500.0 < takeover_threshold < 9_000.0
+  assert 7_400.0 < takeover_threshold < 7_550.0
   simulation.controller.fuel_mass_kg = takeover_threshold
   simulation._update_model_mass(force=True)
   mujoco.mj_forward(simulation.model, simulation.data)
@@ -321,7 +444,7 @@ def test_real_fuel_reserve_takeover_keeps_enough_fuel_to_land() -> None:
 
   assert simulation.landing_phase is LandingPhase.COMPLETE
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
-  assert simulation.controller.fuel_mass_kg > 1_000.0
+  assert simulation.controller.fuel_mass_kg > 4_500.0
 
 
 def test_full_fuel_does_not_trigger_reserve_takeover() -> None:

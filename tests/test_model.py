@@ -795,6 +795,11 @@ def test_controller_indicator_reports_manual_fallback_and_mpc_ownership() -> Non
   label, _ = window._controller_indicator_style()
   assert label == "FALLBACK ACTIVE"
 
+  window.simulation.landing_phase = LandingPhase.COAST
+  label, _ = window._controller_indicator_style()
+  assert label == "COAST ACTIVE"
+  window.simulation.landing_phase = LandingPhase.INACTIVE
+
   window.simulation.enable_mpc = True
   window.simulation.mpc_using_fallback = False
   window.simulation.last_mpc_result = MPCResult(

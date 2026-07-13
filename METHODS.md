@@ -294,7 +294,7 @@ This full heading constraint fixes the former underdetermined-yaw behavior. The 
 
 Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD advances the horizontal target at 3 m/s, and Up/Down moves its altitude at 2 m/s. The target is clamped to a 3.5 m horizontal and 2 m vertical lead relative to the measured center of mass. While an input remains held, this bounded position reference advances with the rocket; it cannot run several metres ahead during the initial counter-tilt and provoke a large corrective swing. Manual lateral-command slew is 2.4 per second rather than 1.6 per second. Auto-land additionally supplies a nonzero vertical target velocity so the controller tracks a deliberate descent profile rather than chasing a moving position target whose nominal velocity is incorrectly zero.
 
-Auto-land supplies references through two phases:
+Auto-land supplies references through three powered/ballistic phases:
 
 ### Align
 
@@ -312,7 +312,30 @@ h_b=h+\frac{\max(v_z,0)^2}{2a_b}.
 
 This does not command an avoidable climb: it captures the braking apex that the current upward trajectory must reach. Rather than jumping the lateral reference directly to the pad, guidance uses a 4 m horizontal lead through 18 m altitude, expands it by 0.15 m per additional metre, and caps it at 8 m. The vertical lead remains 2 m. Fuel-reserve takeover normally holds the current altitude because an emergency fuel trigger should not spend propellant climbing, but it uses the same braking-apex floor when the vehicle is already rising.
 
-DESCEND cannot begin until alignment is completed at staging. The capture gate requires lateral error below 2 m, horizontal speed below 1.0 m/s, staging-altitude error below 2 m, and vertical speed below 1.5 m/s. There is no timeout and no descent-time feasibility bypass. Horizontal correction remains active after the transition, but the large capture maneuver is completed high, before the aggressive descent and 7 m terminal handoff.
+Descent cannot begin until alignment is completed at staging. The capture gate requires lateral error below 2 m, horizontal speed below 1.0 m/s, staging-altitude error below 2 m, and vertical speed below 1.5 m/s. There is no timeout and no descent-time feasibility bypass. Horizontal correction remains active after the transition, but the large capture maneuver is completed high, before the aggressive descent and 7 m terminal handoff.
+
+### Coast and landing-burn ignition
+
+Above 32 m, an aligned vehicle may temporarily shut the main engine off while retaining permission to relight. Entry additionally requires body tilt below 2.5 degrees and angular-rate norm below 0.12 rad/s. The landing-burn ignition altitude for current downward speed $v$ is
+
+\[
+h_i(v)=1.25\frac{\max(v^2-v_t^2,0)}{2(T_{\max}/m-g)}
++v\tau_i+\frac{1}{2}g\tau_i^2+6\ \mathrm{m},
+\]
+
+with target terminal speed $v_t=0.5$ m/s and modeled ignition/actuator allowance $\tau_i=0.45$ s. Coast is used only when at least 5 m of altitude remains between the entry point and this gate. At $h\le h_i(v)$, the engine relights at the 80% upper throttle bound and guidance enters DESCEND.
+
+After a coast relight, the vertical reference does not immediately collapse to the ordinary 12 m/s high-altitude band. It follows
+
+\[
+v_{d,C}(h)=\max\left(v_d(h),
+\sqrt{v_t^2+2a_C\max(h-6,0)}\right),
+\qquad a_C=4\ \mathrm{m/s^2}.
+\]
+
+This energy corridor retains a rapid descent at high altitude and smoothly reduces the permitted downward speed as stopping distance disappears. In the current vacuum model, a from-rest 1,000 m case relights near 590 m after reaching about 90 m/s and lands with propellant remaining.
+
+Because the model currently has only a roll RCS couple, pitch and yaw are uncontrolled while main thrust is zero. Coast therefore starts only from a quiet upright state. It aborts into an early powered relight if tilt exceeds 5 degrees, angular rate exceeds 0.25 rad/s, horizontal error exceeds 2.75 m, or horizontal speed exceeds 1.5 m/s. The landing legs remain stowed. A user `KILL ENGINE` command still transitions to permanent `SHUTDOWN`; it does not share the relightable coast state.
 
 ### Descend
 
@@ -340,7 +363,7 @@ This is essential during powered descent: the previous formulation penalized pos
 
 MPC owns hover, alignment, and the descent above 7 m. At 7 m the controller deliberately hands off to the deterministic coupled 6-DOF terminal law. The low-altitude law uses the same physical gimbal and roll actuators but is more robust when allowable gimbal authority tightens to 3°, 1.5°, and 0.75°. The GUI labels this scheduled mode `TERMINAL ACTIVE`; `FALLBACK ACTIVE` is reserved for genuine MPC warm-up or rejected solves.
 
-Engine cutoff occurs within 0.15 m of the landed body/leg reference height when horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, and vertical speed is between -0.50 and +0.15 m/s. MuJoCo then resolves the deliberately small residual motion through landing-leg contact and pad friction rather than holding the engine on for repeated terminal corrections.
+Engine cutoff normally occurs within 0.15 m of the landed body/leg reference height when horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, and vertical speed is between -0.50 and +0.15 m/s. A fuel-reserve takeover widens the first three limits to 0.30 m height, 1.00 m horizontal error, and 0.60 m/s horizontal speed. MuJoCo then resolves the residual motion through landing-leg contact and pad friction rather than spending emergency reserve on repeated terminal corrections.
 
 ### Landing-leg deployment
 
@@ -375,24 +398,30 @@ t_a=\max\left(
 \frac{\lVert r_{xy}\rVert}{1.5},
 \frac{\lVert v_{xy}\rVert}{0.75},
 \frac{\max(v_z,0)}{g-T_{\min}/m}
-\right)+4\ \mathrm{s}.
+\right)+2.5\ \mathrm{s}.
 \]
 
-The descent time is evaluated from the stopping-aware staging altitude rather than the current altitude and multiplied by 1.20. With current wet mass $m$, gravity magnitude $g$, horizontal speed $v_{xy}$, and excess downward speed $v_e=\max(-v_z-v_d(h),0)$, the impulse estimate is
+For a staging height $h_s$ above 32 m, the estimator finds powered-descent height $h_p$ from the ballistic intersection
 
 \[
-m_{f,I}=1.20\alpha\left[m g(t_a+1.20t_d)
-+m(\lVert v_{xy}\rVert+v_e)\right]+400\ \mathrm{kg}.
+h_p=h_i\left(\sqrt{2g(h_s-h_p)}\right).
+\]
+
+If that saves less than 5 m, $h_p=h_s$ and coast is skipped. For a planned coast, powered time integrates $1/v_{d,C}(h)$ only over $[0,h_p]$; otherwise it uses the ordinary descent profile. Both are multiplied by 1.10. The estimate also includes the future ballistic speed $v_C=\sqrt{2g(h_s-h_p)}$ that must be removed after ignition. With current wet mass $m$, gravity magnitude $g$, horizontal speed $v_{xy}$, and excess downward speed $v_e=\max(-v_z-v_d(h_s),0)$, the impulse estimate is
+
+\[
+m_{f,I}=1.10\alpha\left[m g(t_a+1.10t_{d,C}(h_p))
++m(\lVert v_{xy}\rVert+v_e+v_C)\right]+250\ \mathrm{kg}.
 \]
 
 Rollout testing also showed that triggering solely from the impulse approximation could wait until the vehicle was too light for reliable lateral capture. The minimum safe takeover reserve is therefore
 
 \[
 m_{f,C}=\min\left(9000,
-6000+50h_s+200\lVert r_{xy}\rVert\right)\ \mathrm{kg},
+5500+25\min(h_p,40)+320\lVert r_{xy}\rVert\right)\ \mathrm{kg},
 \]
 
-where $h_s$ is the stopping-aware staging height in metres. The displayed landing estimate is
+where $h_p$ is the predicted powered-descent height in metres. Capping its contribution at 40 m reflects that additional ballistic altitude costs velocity-change impulse rather than hover time; that impulse is already present in $m_{f,I}$. The stronger horizontal term preserves the empirically tested lateral-capture reserve. The displayed landing estimate is
 
 \[
 m_{f,\mathrm{land}}=\max\left(m_{f,I},\frac{m_{f,C}}{1.05}\right).
@@ -404,13 +433,14 @@ When the engine is lit, the rocket is above the end-burn cutoff height, and rema
 m_f\leq 1.05\,m_{f,\mathrm{land}},
 \]
 
-auto-land takes over and the trigger latches for the flight. The threshold is capped at the initial 9,000 kg reserve, so an already marginal state requests landing immediately. Reserve takeover uses the current altitude as its alignment altitude, avoiding an unnecessary climb to the normal staging height, except where upward momentum requires a higher braking apex. The impulse margins and controllability floor are conservative empirical guards for this controller, not an MPC-derived certified propellant-to-go bound.
+auto-land takes over and the trigger latches for the flight. The threshold is capped at the initial 9,000 kg reserve, so an already marginal state requests landing immediately. Reserve takeover uses the current altitude as its alignment altitude, avoiding an unnecessary climb to the normal staging height, except where upward momentum requires a higher braking apex. The coast-aware impulse margins and retuned controllability floor are empirical guards for this controller, not an MPC-derived certified propellant-to-go bound.
 
 ### Controller ownership indicator
 
 The GUI displays the controller that currently owns the actuators:
 
 - `MPC ACTIVE` after a valid SCvx result is accepted;
+- `COAST ACTIVE` while the engine is armed at zero thrust;
 - `TERMINAL ACTIVE` during the scheduled final-approach handoff;
 - `FALLBACK ACTIVE` during MPC warm-up or after a rejected solve;
 - `MANUAL TVC` when hover and auto-land are inactive.
@@ -431,7 +461,8 @@ Implemented:
 
 Not implemented:
 
-- free ignition time;
+- optimizer-selected free ignition time (the state machine uses the explicit
+  stopping-distance gate above);
 - free final time;
 - atmospheric lift and drag;
 - velocity-triggered angle-of-attack constraints;

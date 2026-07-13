@@ -63,15 +63,29 @@ MPC_TERMINAL_HANDOFF_HEIGHT_M = 7.0
 AUTO_LAND_FUEL_MARGIN = 1.05
 AUTO_LAND_FUEL_CHECK_PERIOD_S = 0.25
 AUTO_LAND_TAKEOVER_MIN_HEIGHT_M = 0.15
-AUTO_LAND_FIXED_FUEL_RESERVE_KG = 400.0
+AUTO_LAND_FIXED_FUEL_RESERVE_KG = 250.0
 AUTO_LAND_ALIGNMENT_SPEED_MPS = 1.5
 AUTO_LAND_ALIGNMENT_BRAKING_ACCEL_MPS2 = 0.75
-AUTO_LAND_ALIGNMENT_SETTLE_TIME_S = 4.0
-AUTO_LAND_DESCENT_TIME_MARGIN = 1.20
-AUTO_LAND_CONTROL_IMPULSE_MARGIN = 1.20
-AUTO_LAND_MINIMUM_TAKEOVER_FUEL_KG = 6_000.0
-AUTO_LAND_HEIGHT_RESERVE_KG_PER_M = 50.0
-AUTO_LAND_HORIZONTAL_RESERVE_KG_PER_M = 200.0
+AUTO_LAND_ALIGNMENT_SETTLE_TIME_S = 2.5
+AUTO_LAND_DESCENT_TIME_MARGIN = 1.10
+AUTO_LAND_CONTROL_IMPULSE_MARGIN = 1.10
+AUTO_LAND_MINIMUM_TAKEOVER_FUEL_KG = 5_500.0
+AUTO_LAND_HEIGHT_RESERVE_KG_PER_M = 25.0
+AUTO_LAND_HORIZONTAL_RESERVE_KG_PER_M = 320.0
+COAST_MIN_ENTRY_HEIGHT_M = 32.0
+COAST_MIN_ALTITUDE_SAVING_M = 5.0
+COAST_ENTRY_MAX_TILT_RADIANS = math.radians(2.5)
+COAST_ENTRY_MAX_ANGULAR_RATE_RPS = 0.12
+COAST_ABORT_MAX_TILT_RADIANS = math.radians(5.0)
+COAST_ABORT_MAX_ANGULAR_RATE_RPS = 0.25
+COAST_ABORT_MAX_HORIZONTAL_ERROR_M = 2.75
+COAST_ABORT_MAX_HORIZONTAL_SPEED_MPS = 1.50
+COAST_TARGET_TOUCHDOWN_SPEED_MPS = 0.50
+COAST_IGNITION_DELAY_S = 0.45
+COAST_STOPPING_DISTANCE_FACTOR = 1.25
+COAST_FIXED_BURN_MARGIN_M = 6.0
+COAST_BURN_REFERENCE_DECELERATION_MPS2 = 4.0
+COAST_BURN_REFERENCE_TERMINAL_HEIGHT_M = 6.0
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 ASYNC_MPC_MAX_ACCEPT_AGE_S = 0.35
@@ -123,12 +137,13 @@ GUI_PANEL_MARGIN = 22.0
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.20 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.21 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
   INACTIVE = auto()
   ALIGN = auto()
+  COAST = auto()
   DESCEND = auto()
   COMPLETE = auto()
   ABORTED = auto()
@@ -276,6 +291,7 @@ class RocketSimulation:
     self.hover_target_velocity = np.zeros(3, dtype=float)
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.landing_burn_from_coast = False
     self.landing_leg_deployment = 0.0
     self.landing_legs_deploy_commanded = False
     self.launch_mount_enabled = True
@@ -294,6 +310,7 @@ class RocketSimulation:
     self.hover_target_velocity[:] = 0.0
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.landing_burn_from_coast = False
     self.landing_leg_deployment = 0.0
     self.landing_legs_deploy_commanded = False
     self.fuel_takeover_triggered = False
@@ -348,6 +365,8 @@ class RocketSimulation:
   def enable_hover(self) -> bool:
     if self.controller.engine_state is EngineState.OFF:
       self.controller.ignite()
+    elif self.controller.engine_state is EngineState.COAST:
+      self.controller.relight()
     if self.controller.engine_state is not EngineState.LIT:
       return False
     self._invalidate_mpc_solution()
@@ -359,16 +378,26 @@ class RocketSimulation:
     return True
 
   def disable_hover(self) -> None:
+    if (
+      self.landing_phase is LandingPhase.COAST
+      and self.controller.engine_state is EngineState.COAST
+    ):
+      self.controller.relight()
     self._invalidate_mpc_solution()
     self.hover_enabled = False
     self.hover_target_velocity[:] = 0.0
     self.controller.center_lateral()
     if self.landing_phase not in (LandingPhase.COMPLETE, LandingPhase.ABORTED):
       self.landing_phase = LandingPhase.INACTIVE
+      self.landing_burn_from_coast = False
 
   @property
   def landing_active(self) -> bool:
-    return self.landing_phase in (LandingPhase.ALIGN, LandingPhase.DESCEND)
+    return self.landing_phase in (
+      LandingPhase.ALIGN,
+      LandingPhase.COAST,
+      LandingPhase.DESCEND,
+    )
 
   @property
   def terminal_controller_active(self) -> bool:
@@ -633,6 +662,8 @@ class RocketSimulation:
   def start_landing(self, *, fuel_takeover: bool = False) -> bool:
     if self.controller.engine_state is EngineState.OFF:
       self.controller.ignite()
+    elif self.controller.engine_state is EngineState.COAST:
+      self.controller.relight()
     if self.controller.engine_state is not EngineState.LIT:
       return False
 
@@ -648,6 +679,7 @@ class RocketSimulation:
     self.hover_target_velocity[:] = 0.0
     self.hover_enabled = True
     self.landing_phase = LandingPhase.ALIGN
+    self.landing_burn_from_coast = False
     self.fuel_takeover_active = fuel_takeover
     if fuel_takeover:
       self.fuel_takeover_triggered = True
@@ -656,8 +688,16 @@ class RocketSimulation:
 
   def cancel_landing(self) -> None:
     if self.landing_active:
+      if (
+        self.landing_phase is LandingPhase.COAST
+        and not self.controller.relight()
+      ):
+        self.landing_phase = LandingPhase.ABORTED
+        self.hover_enabled = False
+        return
       self._invalidate_mpc_solution()
       self.landing_phase = LandingPhase.INACTIVE
+      self.landing_burn_from_coast = False
       self.fuel_takeover_active = False
       self.hover_target_position = self.center_of_mass_position_world()
       self.hover_target_velocity[:] = 0.0
@@ -684,7 +724,16 @@ class RocketSimulation:
 
   def _descent_rate_mps(self) -> float:
     height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
-    return self.descent_rate_for_height_mps(height)
+    scheduled_rate = self.descent_rate_for_height_mps(height)
+    if not self.landing_burn_from_coast:
+      return scheduled_rate
+    energy_rate = math.sqrt(
+      COAST_TARGET_TOUCHDOWN_SPEED_MPS ** 2
+      + 2.0
+      * COAST_BURN_REFERENCE_DECELERATION_MPS2
+      * max(height - COAST_BURN_REFERENCE_TERMINAL_HEIGHT_M, 0.0)
+    )
+    return max(scheduled_rate, energy_rate)
 
   @staticmethod
   def landing_horizontal_lead_for_height_m(height_m: float) -> float:
@@ -758,15 +807,31 @@ class RocketSimulation:
       horizontal_speed / AUTO_LAND_ALIGNMENT_BRAKING_ACCEL_MPS2,
       upward_braking_time,
     ) + AUTO_LAND_ALIGNMENT_SETTLE_TIME_S
-    descent_time = (
-      AUTO_LAND_DESCENT_TIME_MARGIN
-      * self.estimated_descent_time_seconds(staging_height)
+    powered_descent_height = self.estimated_powered_descent_height_m(
+      staging_height
+    )
+    coast_planned = powered_descent_height < staging_height
+    descent_time = AUTO_LAND_DESCENT_TIME_MARGIN * (
+      self.estimated_coast_burn_time_seconds(powered_descent_height)
+      if coast_planned
+      else self.estimated_descent_time_seconds(powered_descent_height)
     )
     desired_descent_speed = self.descent_rate_for_height_mps(staging_height)
     excess_descent_speed = max(-float(velocity[2]) - desired_descent_speed, 0.0)
+    coast_braking_speed = (
+      math.sqrt(
+        max(
+          2.0 * gravity * (staging_height - powered_descent_height),
+          0.0,
+        )
+      )
+      if coast_planned
+      else 0.0
+    )
     estimated_impulse = AUTO_LAND_CONTROL_IMPULSE_MARGIN * (
       mass * gravity * (align_time + descent_time)
-      + mass * (horizontal_speed + excess_descent_speed)
+      + mass
+      * (horizontal_speed + excess_descent_speed + coast_braking_speed)
     )
     impulse_estimate = float(
       self.controller.limits.alpha_kg_per_newton_second * estimated_impulse
@@ -775,11 +840,141 @@ class RocketSimulation:
     minimum_takeover_fuel = min(
       self.controller.initial_fuel_mass_kg,
       AUTO_LAND_MINIMUM_TAKEOVER_FUEL_KG
-      + AUTO_LAND_HEIGHT_RESERVE_KG_PER_M * staging_height
+      + AUTO_LAND_HEIGHT_RESERVE_KG_PER_M
+      * min(powered_descent_height, 40.0)
       + AUTO_LAND_HORIZONTAL_RESERVE_KG_PER_M * horizontal_error,
     )
     controllability_floor = minimum_takeover_fuel / AUTO_LAND_FUEL_MARGIN
     return max(impulse_estimate, controllability_floor)
+
+  def landing_burn_altitude_m(self, downward_speed_mps: float) -> float:
+    """Return the conservative AGL ignition gate for a relightable coast."""
+
+    speed = max(float(downward_speed_mps), 0.0)
+    gravity = abs(float(self.model.opt.gravity[2]))
+    maximum_acceleration = (
+      self.controller.limits.max_thrust_newtons
+      / max(self.controller.wet_mass_kg, 1.0)
+    )
+    net_braking_acceleration = max(maximum_acceleration - gravity, 0.25)
+    target_speed_squared = COAST_TARGET_TOUCHDOWN_SPEED_MPS ** 2
+    stopping_distance = max(
+      speed * speed - target_speed_squared,
+      0.0,
+    ) / (2.0 * net_braking_acceleration)
+    ignition_delay_distance = (
+      speed * COAST_IGNITION_DELAY_S
+      + 0.5 * gravity * COAST_IGNITION_DELAY_S ** 2
+    )
+    return (
+      COAST_STOPPING_DISTANCE_FACTOR * stopping_distance
+      + ignition_delay_distance
+      + COAST_FIXED_BURN_MARGIN_M
+    )
+
+  def estimated_powered_descent_height_m(self, staging_height_m: float) -> float:
+    """Estimate where a from-rest ballistic coast reaches the ignition gate."""
+
+    staging_height = max(float(staging_height_m), 0.0)
+    if staging_height <= COAST_MIN_ENTRY_HEIGHT_M:
+      return staging_height
+    gravity = abs(float(self.model.opt.gravity[2]))
+    low = 0.0
+    high = staging_height
+    for _ in range(40):
+      candidate = 0.5 * (low + high)
+      downward_speed = math.sqrt(
+        max(2.0 * gravity * (staging_height - candidate), 0.0)
+      )
+      if candidate >= self.landing_burn_altitude_m(downward_speed):
+        high = candidate
+      else:
+        low = candidate
+    burn_height = high
+    if staging_height - burn_height < COAST_MIN_ALTITUDE_SAVING_M:
+      return staging_height
+    return burn_height
+
+  @classmethod
+  def estimated_coast_burn_time_seconds(cls, height_m: float) -> float:
+    """Integrate the energy-based post-relight descent-speed corridor."""
+
+    height = max(float(height_m), 0.0)
+    if height <= 0.0:
+      return 0.0
+    sample_count = max(64, int(math.ceil(height)) + 1)
+    samples = np.linspace(0.0, height, sample_count)
+    rates = []
+    for sample in samples:
+      scheduled_rate = cls.descent_rate_for_height_mps(sample)
+      energy_rate = math.sqrt(
+        COAST_TARGET_TOUCHDOWN_SPEED_MPS ** 2
+        + 2.0
+        * COAST_BURN_REFERENCE_DECELERATION_MPS2
+        * max(sample - COAST_BURN_REFERENCE_TERMINAL_HEIGHT_M, 0.0)
+      )
+      rates.append(max(scheduled_rate, energy_rate))
+    inverse_rates = 1.0 / np.asarray(rates, dtype=float)
+    intervals = np.diff(samples)
+    return float(
+      np.sum(0.5 * intervals * (inverse_rates[:-1] + inverse_rates[1:]))
+    )
+
+  def _body_tilt_radians(self) -> float:
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    return math.acos(float(np.clip(rotation[2, 2], -1.0, 1.0)))
+
+  def _can_begin_landing_coast(
+    self,
+    *,
+    height_m: float,
+    horizontal_error_m: float,
+    horizontal_speed_mps: float,
+  ) -> bool:
+    if height_m < COAST_MIN_ENTRY_HEIGHT_M:
+      return False
+    burn_height = self.landing_burn_altitude_m(
+      max(-float(self.center_of_mass_velocity_world()[2]), 0.0)
+    )
+    return (
+      height_m - burn_height >= COAST_MIN_ALTITUDE_SAVING_M
+      and horizontal_error_m < LANDING_DESCENT_CAPTURE_RADIUS_M
+      and horizontal_speed_mps < LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS
+      and self._body_tilt_radians() < COAST_ENTRY_MAX_TILT_RADIANS
+      and float(np.linalg.norm(self.data.qvel[3:6]))
+      < COAST_ENTRY_MAX_ANGULAR_RATE_RPS
+    )
+
+  def _coast_requires_early_ignition(
+    self,
+    *,
+    height_m: float,
+    horizontal_error_m: float,
+    horizontal_speed_mps: float,
+  ) -> bool:
+    downward_speed = max(-float(self.center_of_mass_velocity_world()[2]), 0.0)
+    return (
+      height_m <= self.landing_burn_altitude_m(downward_speed)
+      or horizontal_error_m > COAST_ABORT_MAX_HORIZONTAL_ERROR_M
+      or horizontal_speed_mps > COAST_ABORT_MAX_HORIZONTAL_SPEED_MPS
+      or self._body_tilt_radians() > COAST_ABORT_MAX_TILT_RADIANS
+      or float(np.linalg.norm(self.data.qvel[3:6]))
+      > COAST_ABORT_MAX_ANGULAR_RATE_RPS
+    )
+
+  def _ignite_landing_burn(self) -> bool:
+    if not self.controller.relight(
+      throttle=self.controller.limits.max_throttle
+    ):
+      return False
+    self._invalidate_mpc_solution()
+    self.hover_enabled = True
+    self.hover_target_position = self.center_of_mass_position_world()
+    self.hover_target_velocity = self.center_of_mass_velocity_world()
+    self.controller.center_lateral()
+    self.landing_burn_from_coast = True
+    self.landing_phase = LandingPhase.DESCEND
+    return True
 
   def fuel_takeover_threshold_kg(self) -> float:
     return min(
@@ -794,6 +989,8 @@ class RocketSimulation:
     ):
       return
     self.last_fuel_takeover_check_time = float(self.data.time)
+    if self.controller.engine_state is EngineState.COAST and self.landing_active:
+      return
     if self.controller.engine_state is not EngineState.LIT:
       self.last_estimated_landing_fuel_kg = 0.0
       return
@@ -818,7 +1015,12 @@ class RocketSimulation:
   def _update_landing_guidance(self) -> None:
     if not self.landing_active:
       return
-    if self.controller.engine_state is not EngineState.LIT:
+    expected_engine_state = (
+      EngineState.COAST
+      if self.landing_phase is LandingPhase.COAST
+      else EngineState.LIT
+    )
+    if self.controller.engine_state is not expected_engine_state:
       self._invalidate_mpc_solution()
       self.hover_enabled = False
       self.hover_target_velocity[:] = 0.0
@@ -859,7 +1061,37 @@ class RocketSimulation:
         and abs(velocity[2]) < LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS
       )
       if aligned:
-        self.landing_phase = LandingPhase.DESCEND
+        if self._can_begin_landing_coast(
+          height_m=height,
+          horizontal_error_m=horizontal_error,
+          horizontal_speed_mps=horizontal_speed,
+        ) and self.controller.begin_coast():
+          self._invalidate_mpc_solution()
+          self.controller.center_lateral()
+          self.hover_target_position = landed_com_position.copy()
+          self.hover_target_position[2] += self.landing_burn_altitude_m(0.0)
+          self.hover_target_velocity[:] = 0.0
+          self.landing_phase = LandingPhase.COAST
+        else:
+          self.landing_phase = LandingPhase.DESCEND
+
+    if self.landing_phase is LandingPhase.COAST:
+      self.hover_target_position[0:2] = landed_com_position[0:2]
+      self.hover_target_position[2] = (
+        landed_com_position[2]
+        + self.landing_burn_altitude_m(
+          max(-float(velocity[2]), 0.0)
+        )
+      )
+      self.hover_target_velocity[:] = velocity
+      if self._coast_requires_early_ignition(
+        height_m=height,
+        horizontal_error_m=horizontal_error,
+        horizontal_speed_mps=horizontal_speed,
+      ):
+        if not self._ignite_landing_burn():
+          self.hover_enabled = False
+          self.landing_phase = LandingPhase.ABORTED
 
     if self.landing_phase is LandingPhase.DESCEND:
       self.hover_target_position[0:2] = self._bounded_landing_horizontal_target(
@@ -880,10 +1112,10 @@ class RocketSimulation:
         0.0,
       )
       ready_for_cutoff = (
-        height < 0.15
+        height < (0.30 if self.fuel_takeover_active else 0.15)
         and -0.50 <= body_velocity[2] <= 0.15
-        and horizontal_error < 0.50
-        and horizontal_speed < 0.30
+        and horizontal_error < (1.00 if self.fuel_takeover_active else 0.50)
+        and horizontal_speed < (0.60 if self.fuel_takeover_active else 0.30)
       )
       if ready_for_cutoff:
         self._invalidate_mpc_solution()
@@ -891,6 +1123,7 @@ class RocketSimulation:
         self.hover_enabled = False
         self.hover_target_velocity[:] = 0.0
         self.controller.center_lateral()
+        self.landing_burn_from_coast = False
         self.landing_phase = LandingPhase.COMPLETE
 
   def move_hover_target(self, delta_world: np.ndarray) -> None:
@@ -1561,7 +1794,7 @@ class RocketSimulation:
 
     target = (
       self.roll_control_torque_command_nm
-      if self.controller.engine_state is EngineState.LIT
+      if self.controller.engine_state in (EngineState.LIT, EngineState.COAST)
       else 0.0
     )
     blend = 1.0 - math.exp(
@@ -1719,7 +1952,20 @@ class RocketSimulation:
     self._check_fuel_reserve_takeover()
     self._update_landing_guidance()
     self._update_landing_legs()
-    if self.hover_enabled:
+    if self.landing_phase is LandingPhase.COAST:
+      self.engine_gimbal_command_radians[:] = 0.0
+      self.controller.center_lateral()
+      desired_torque = self._attitude_control_torque_body(
+        np.array([0.0, 0.0, 1.0])
+      )
+      self.roll_control_torque_command_nm = float(
+        np.clip(
+          desired_torque[2],
+          -MAX_ROLL_CONTROL_TORQUE_NM,
+          MAX_ROLL_CONTROL_TORQUE_NM,
+        )
+      )
+    elif self.hover_enabled:
       self._update_hover_controller()
     else:
       self._poll_mpc_result()
@@ -1740,6 +1986,12 @@ class RocketSimulation:
         "MODE AUTO LAND: FUEL RESERVE ALIGN"
         if self.fuel_takeover_active
         else "MODE AUTO LAND: ALIGN OVER PAD"
+      )
+    elif self.landing_phase is LandingPhase.COAST:
+      coast_source = "FUEL RESERVE " if self.fuel_takeover_active else ""
+      mode_line = (
+        f"MODE AUTO LAND: {coast_source}COAST    "
+        f"IGNITE BELOW {self.hover_target_position[2] - self.landing_center_of_mass_position()[2]:.1f} m"
       )
     elif self.landing_phase is LandingPhase.DESCEND:
       descent_source = "FUEL RESERVE " if self.fuel_takeover_active else ""
@@ -1766,7 +2018,9 @@ class RocketSimulation:
       math.acos(float(np.clip(rotation[2, 2], -1.0, 1.0)))
     )
     gimbal_angle = math.degrees(float(np.linalg.norm(self.engine_gimbal_radians)))
-    if self.hover_enabled and self.terminal_controller_active:
+    if self.landing_phase is LandingPhase.COAST:
+      control_line = "CTRL BALLISTIC COAST: ENGINE ARMED"
+    elif self.hover_enabled and self.terminal_controller_active:
       control_line = "CTRL 6-DOF TERMINAL"
     elif self.hover_enabled and self.enable_mpc:
       if self.mpc_using_fallback:
@@ -2057,6 +2311,8 @@ class RocketWindow:
     self,
   ) -> tuple[str, tuple[float, float, float, float]]:
     simulation = self.simulation
+    if simulation.landing_phase is LandingPhase.COAST:
+      return "COAST ACTIVE", (0.08, 0.42, 0.70, 0.96)
     if simulation.hover_enabled:
       if simulation.terminal_controller_active:
         return "TERMINAL ACTIVE", (0.20, 0.32, 0.68, 0.96)
@@ -2298,7 +2554,10 @@ class RocketWindow:
         self.ui_pointer_captured = True
         if self.simulation.controller.engine_state is EngineState.OFF:
           self._ignite()
-        elif self.simulation.controller.engine_state is EngineState.LIT:
+        elif self.simulation.controller.engine_state in (
+          EngineState.LIT,
+          EngineState.COAST,
+        ):
           self._kill_engine()
         else:
           self._set_status("Press R to start a new flight")
@@ -2460,6 +2719,9 @@ class RocketWindow:
     elif state is EngineState.LIT:
       color = (0.72, 0.06, 0.04, 0.95)
       label = "KILL ENGINE"
+    elif state is EngineState.COAST:
+      color = (0.72, 0.34, 0.02, 0.95)
+      label = "COAST - KILL"
     elif state is EngineState.SHUTDOWN:
       color = (0.18, 0.19, 0.21, 0.90)
       label = "ENGINE KILLED"
@@ -2491,6 +2753,13 @@ class RocketWindow:
         "FUEL AUTO: ALIGN"
         if self.simulation.fuel_takeover_active
         else "LAND: ALIGN"
+      )
+    elif self.simulation.landing_phase is LandingPhase.COAST:
+      land_color = (0.12, 0.42, 0.68, 0.96)
+      land_label = (
+        "FUEL AUTO: COAST"
+        if self.simulation.fuel_takeover_active
+        else "LAND: COAST"
       )
     elif self.simulation.landing_phase is LandingPhase.DESCEND:
       land_color = (0.78, 0.38, 0.02, 0.96)
