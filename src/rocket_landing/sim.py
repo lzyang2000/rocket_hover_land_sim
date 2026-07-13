@@ -52,7 +52,10 @@ HOVER_TARGET_HORIZONTAL_LEAD_M = 2.5
 HOVER_TARGET_VERTICAL_LEAD_M = 2.0
 LANDING_ALIGNMENT_HORIZONTAL_LEAD_M = 4.0
 LANDING_ALIGNMENT_VERTICAL_LEAD_M = 2.0
-LANDING_DESCENT_CAPTURE_RADIUS_M = 2.0
+LANDING_DESCENT_CAPTURE_BASE_RADIUS_M = 2.0
+LANDING_DESCENT_CAPTURE_REFERENCE_HEIGHT_M = 18.0
+LANDING_DESCENT_CAPTURE_RADIUS_PER_HEIGHT = 0.15
+LANDING_DESCENT_CAPTURE_MAX_RADIUS_M = 8.0
 LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS = 1.0
 LANDING_DESCENT_CAPTURE_ALTITUDE_ERROR_M = 2.0
 LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS = 1.5
@@ -94,7 +97,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.10 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.11 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -426,6 +429,33 @@ class RocketSimulation:
     height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
     return self.descent_rate_for_height_mps(height)
 
+  @staticmethod
+  def descent_capture_radius_for_height_m(height_m: float) -> float:
+    """Allow more lateral capture error when altitude provides correction time."""
+
+    expanded_radius = (
+      LANDING_DESCENT_CAPTURE_BASE_RADIUS_M
+      + LANDING_DESCENT_CAPTURE_RADIUS_PER_HEIGHT
+      * max(
+        float(height_m) - LANDING_DESCENT_CAPTURE_REFERENCE_HEIGHT_M,
+        0.0,
+      )
+    )
+    return min(expanded_radius, LANDING_DESCENT_CAPTURE_MAX_RADIUS_M)
+
+  @staticmethod
+  def _bounded_landing_horizontal_target(
+    position: np.ndarray,
+    landed_position: np.ndarray,
+  ) -> np.ndarray:
+    horizontal_offset = landed_position[0:2] - position[0:2]
+    horizontal_distance = float(np.linalg.norm(horizontal_offset))
+    if horizontal_distance > LANDING_ALIGNMENT_HORIZONTAL_LEAD_M:
+      horizontal_offset *= (
+        LANDING_ALIGNMENT_HORIZONTAL_LEAD_M / horizontal_distance
+      )
+    return position[0:2] + horizontal_offset
+
   @classmethod
   def estimated_descent_time_seconds(cls, height_m: float) -> float:
     """Numerically integrate dh/v(h) through the nonzero speed bands."""
@@ -513,16 +543,14 @@ class RocketSimulation:
     landed_com_position = self.landing_center_of_mass_position()
     horizontal_error = float(np.linalg.norm(position[0:2]))
     horizontal_speed = float(np.linalg.norm(velocity[0:2]))
+    height = max(float(body_position[2] - LANDING_PAD_POSITION[2]), 0.0)
 
     if self.landing_phase is LandingPhase.ALIGN:
       self.hover_target_velocity[:] = 0.0
-      horizontal_offset = landed_com_position[0:2] - position[0:2]
-      horizontal_distance = float(np.linalg.norm(horizontal_offset))
-      if horizontal_distance > LANDING_ALIGNMENT_HORIZONTAL_LEAD_M:
-        horizontal_offset *= (
-          LANDING_ALIGNMENT_HORIZONTAL_LEAD_M / horizontal_distance
-        )
-      self.hover_target_position[0:2] = position[0:2] + horizontal_offset
+      self.hover_target_position[0:2] = self._bounded_landing_horizontal_target(
+        position,
+        landed_com_position,
+      )
       vertical_offset = float(self.landing_staging_altitude - position[2])
       self.hover_target_position[2] = position[2] + float(
         np.clip(
@@ -531,8 +559,9 @@ class RocketSimulation:
           LANDING_ALIGNMENT_VERTICAL_LEAD_M,
         )
       )
+      capture_radius = self.descent_capture_radius_for_height_m(height)
       aligned = (
-        horizontal_error < LANDING_DESCENT_CAPTURE_RADIUS_M
+        horizontal_error < capture_radius
         and horizontal_speed
         < LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS
         and abs(position[2] - self.landing_staging_altitude)
@@ -543,7 +572,10 @@ class RocketSimulation:
         self.landing_phase = LandingPhase.DESCEND
 
     if self.landing_phase is LandingPhase.DESCEND:
-      self.hover_target_position[0:2] = landed_com_position[0:2]
+      self.hover_target_position[0:2] = self._bounded_landing_horizontal_target(
+        position,
+        landed_com_position,
+      )
       previous_target_z = float(self.hover_target_position[2])
       requested_rate = self._descent_rate_mps()
       next_target_z = max(
@@ -556,7 +588,6 @@ class RocketSimulation:
         (previous_target_z - next_target_z) / self.model.opt.timestep,
         0.0,
       )
-      height = float(body_position[2] - LANDING_PAD_POSITION[2])
       ready_for_cutoff = (
         height < 0.15
         and -0.50 <= body_velocity[2] <= 0.15

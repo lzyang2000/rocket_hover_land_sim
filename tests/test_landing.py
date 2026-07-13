@@ -219,6 +219,47 @@ def test_align_phase_waits_outside_descent_capture_corridor() -> None:
   assert simulation.landing_phase is LandingPhase.ALIGN
 
 
+def test_high_altitude_align_uses_a_wider_descent_capture_corridor() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[0:3] = (
+    4.25,
+    0.0,
+    ROCKET_LANDED_COM_Z_M + 35.0,
+  )
+  simulation.data.qvel[:] = 0.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  assert simulation.start_landing()
+  simulation._update_landing_guidance()
+
+  assert simulation.descent_capture_radius_for_height_m(35.0) == pytest.approx(
+    4.55
+  )
+  assert simulation.landing_phase is LandingPhase.DESCEND
+
+
+def test_descent_keeps_horizontal_target_inside_bounded_lead() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[0:3] = (
+    10.0,
+    0.0,
+    ROCKET_LANDED_COM_Z_M + 35.0,
+  )
+  simulation.data.qvel[:] = 0.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  position = simulation.center_of_mass_position_world()
+
+  simulation._update_landing_guidance()
+
+  target_offset = simulation.hover_target_position[0:2] - position[0:2]
+  assert np.linalg.norm(target_offset) == pytest.approx(4.0)
+  assert abs(float(simulation.hover_target_position[0])) < abs(float(position[0]))
+
+
 def test_mpc_offset_alignment_is_bounded_and_rarely_falls_back() -> None:
   simulation = RocketSimulation(enable_mpc=True)
   simulation.data.qpos[0:3] = (

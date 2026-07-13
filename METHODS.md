@@ -298,7 +298,7 @@ Auto-land supplies references through two phases:
 
 ### Align
 
-The controller moves above the pad and stabilizes position, velocity, attitude, and angular rate. Rather than jumping the reference directly to the pad, guidance places it at most 4 m horizontally and 2 m vertically ahead of the measured vehicle. This bounded reference lead reduces the acceleration, tilt, and MPC linearization change during a large capture maneuver. ALIGN is a capture phase rather than a requirement to hover nearly over pad center: descent begins within 2.0 m once horizontal speed is below 1.0 m/s, staging-altitude error is below 2 m, and vertical speed is below 1.5 m/s. Horizontal correction continues during DESCEND, while the much tighter touchdown gates remain unchanged.
+The controller moves above the pad and stabilizes position, velocity, attitude, and angular rate. Rather than jumping the reference directly to the pad, guidance places it at most 4 m horizontally and 2 m vertically ahead of the measured vehicle. This bounded reference lead reduces the acceleration, tilt, and MPC linearization change during a large capture maneuver. ALIGN is a capture phase rather than a requirement to hover nearly over pad center. Its lateral capture radius remains 2 m through 18 m altitude, then expands by 0.15 m per additional metre and is capped at 8 m. Inside that altitude-aware corridor, descent begins once horizontal speed is below 1.0 m/s, staging-altitude error is below 2 m, and vertical speed is below 1.5 m/s. Horizontal correction continues during DESCEND through the same bounded 4 m lead, while the much tighter touchdown gates remain unchanged.
 
 ### Descend
 
