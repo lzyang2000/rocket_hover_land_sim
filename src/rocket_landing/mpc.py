@@ -135,7 +135,7 @@ class MPCConfig:
   minimum_com_height_m: float = 20.66
   state_trust_radius: float = 1.75
   control_trust_radius: float = 1.25
-  virtual_control_weight: float = 8_000.0
+  virtual_control_weight: float = 300_000.0
   trust_region_weight: float = 1.0
   maximum_scaled_defect: float = 0.10
 

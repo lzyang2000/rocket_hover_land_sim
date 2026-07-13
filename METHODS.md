@@ -207,7 +207,7 @@ Hover uses forward finite differences to produce `A_k` and `B_k`; each node reus
 c_k=F_d(\bar x_k,\bar u_k)-A_k\bar x_k-B_k\bar u_k.
 \]
 
-The virtual control `nu_k` is the artificial-infeasibility safeguard used in the SCvx literature. It receives a large scaled L1 penalty, allowing a convex subproblem to remain feasible even if a linearization is temporarily inconsistent. Valid converged solutions drive virtual control toward zero.
+The virtual control `nu_k` is the artificial-infeasibility safeguard used in the SCvx literature. It receives a scaled L1 penalty of 300,000, allowing a convex subproblem to remain feasible if a linearization is temporarily inconsistent while making artificial state motion much more expensive than accepting physically reachable tracking error. Valid converged solutions drive virtual control toward zero.
 
 Scaled trust regions bound deviations from the nominal state and control trajectories. They address artificial unboundedness and keep first-order dynamics approximations locally meaningful.
 
@@ -262,6 +262,8 @@ The preview reference is shifted and strongly blended toward the latest GUI or l
 Asynchronous MPC therefore never installs the delayed `MPCResult.control` vector. That raw first thrust/gimbal/roll command remains exclusive to synchronous mode. If no acceptable async trajectory exists, the same deterministic controller tracks the latest hover or landing target directly.
 
 Every result is checked for solver status, finite values, actuator bounds, and nonlinear rollout defect. Until the first valid solution arrives—or whenever a solve fails—the simulator uses a deterministic 6-DOF PD controller. Failure cannot leave unconstrained or stale actuator commands active.
+
+The stronger virtual-control penalty matters most at high-energy landing-burn ignition. With the earlier weight of 8,000, the first nominally optimal full-throttle landing solve used about 1.30 scaled virtual control and produced about 1.30 nonlinear defect, far above the 0.20 acceptance limit. At 300,000, the same state solves with roughly 0.005 defect and a physically correct maximum-thrust first command. Across the complete deterministic regression, about 72% of MPC attempts above the terminal handoff are accepted instead of none; rejected attempts remain under PD control.
 
 Telemetry distinguishes:
 

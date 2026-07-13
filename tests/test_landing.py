@@ -1,10 +1,12 @@
 import math
+from dataclasses import replace
 
 import mujoco
 import numpy as np
 import pytest
 
 from rocket_landing.controller import EngineState
+from rocket_landing.mpc import SixDofMPC
 from rocket_landing.sim import (
   AUTO_LAND_FUEL_CHECK_PERIOD_S,
   AUTO_LAND_FUEL_MARGIN,
@@ -342,16 +344,24 @@ def test_1000m_ballistic_coast_uses_energy_corridor_and_lands() -> None:
 
 
 def test_full_throttle_launch_fuel_auto_lands_below_100kg_reserve() -> None:
-  simulation = RocketSimulation()
+  simulation = RocketSimulation(enable_mpc=True)
   simulation.controller.ignite()
   simulation.controller.throttle = simulation.controller.limits.max_throttle
 
   takeover_fuel = None
   takeover_height = None
   takeover_vertical_speed = None
+  mpc_attempts = 0
+  accepted_mpc_attempts = 0
+  last_mpc_request_time = -math.inf
   for _ in range(30_000):
     previous_phase = simulation.landing_phase
     simulation.step()
+    if simulation.last_mpc_request_time != last_mpc_request_time:
+      last_mpc_request_time = simulation.last_mpc_request_time
+      if simulation.last_mpc_result is not None:
+        mpc_attempts += 1
+        accepted_mpc_attempts += int(simulation.last_mpc_result.success)
     if (
       previous_phase is LandingPhase.INACTIVE
       and simulation.landing_phase is LandingPhase.COAST
@@ -374,6 +384,44 @@ def test_full_throttle_launch_fuel_auto_lands_below_100kg_reserve() -> None:
   assert simulation.landing_phase is LandingPhase.COMPLETE
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
   assert 0.0 < simulation.controller.fuel_mass_kg < 100.0
+  assert mpc_attempts > 50
+  assert accepted_mpc_attempts / mpc_attempts > 0.60
+
+
+def test_high_energy_landing_mpc_rejects_virtual_state_teleportation() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  simulation.controller.fuel_mass_kg = 5_145.0
+  simulation.controller.ignite()
+  simulation.controller.throttle = simulation.controller.limits.max_throttle
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 1_020.0
+  simulation.data.qvel[2] = -136.0
+  simulation._update_model_mass(force=True)
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.landing_burn_from_coast = True
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  simulation.hover_target_velocity[:] = 0.0
+  simulation._update_landing_guidance()
+
+  high_energy_mpc = SixDofMPC(
+    replace(simulation._mpc_config, successive_iterations=2)
+  )
+  result = high_energy_mpc.solve(
+    simulation._mpc_state(),
+    simulation._mpc_target_state(),
+    simulation._current_actuator_control(),
+    max_gimbal_radians=simulation._mpc_gimbal_limit_radians(),
+    central_differences=True,
+  )
+
+  assert result.success, result.status
+  assert result.scaled_dynamics_defect < 0.02
+  assert result.scaled_virtual_control < 0.01
+  assert result.control[0] == pytest.approx(
+    simulation.controller.limits.max_thrust_newtons,
+    rel=1e-5,
+  )
 
 
 def test_low_altitude_landing_skips_ballistic_coast() -> None:
@@ -585,7 +633,7 @@ def test_descent_keeps_horizontal_target_inside_bounded_lead() -> None:
   assert abs(float(simulation.hover_target_position[0])) < abs(float(position[0]))
 
 
-def test_mpc_offset_alignment_is_bounded_and_rarely_falls_back() -> None:
+def test_mpc_offset_alignment_is_bounded_and_rarely_uses_pd() -> None:
   simulation = RocketSimulation(enable_mpc=True)
   simulation.data.qpos[0:3] = (
     4.0,
