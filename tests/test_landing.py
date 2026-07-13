@@ -8,7 +8,9 @@ from rocket_landing.controller import EngineState
 from rocket_landing.sim import (
   AUTO_LAND_FUEL_CHECK_PERIOD_S,
   AUTO_LAND_FUEL_MARGIN,
+  LANDING_LEG_DEPLOYMENT_TIME_S,
   LANDING_STAGING_HEIGHT_M,
+  MPC_TERMINAL_HANDOFF_HEIGHT_M,
   LandingPhase,
   ROCKET_LANDED_COM_Z_M,
   RocketSimulation,
@@ -32,6 +34,7 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
   )
   phases_seen = {simulation.landing_phase}
   descent_start_position = None
+  fully_deployed_before_cutoff = False
   for _ in range(7000):
     previous_phase = simulation.landing_phase
     simulation.step()
@@ -51,6 +54,11 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
         simulation.controller.pointing_angle_deg()
         <= simulation.controller.limits.pointing_half_angle_deg
       )
+    if (
+      simulation.landing_leg_deployment >= 1.0 - 1e-9
+      and simulation.controller.engine_state is EngineState.LIT
+    ):
+      fully_deployed_before_cutoff = True
     if simulation.landing_phase is LandingPhase.COMPLETE:
       break
 
@@ -61,6 +69,8 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
   assert abs(descent_start_position[2] - simulation.landing_staging_altitude) < 2.0
   assert simulation.landing_phase is LandingPhase.COMPLETE
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
+  assert fully_deployed_before_cutoff
+  assert simulation.landing_leg_deployment == pytest.approx(1.0)
 
   for _ in range(1000):
     simulation.step()
@@ -69,6 +79,69 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
   assert abs(float(simulation.data.qpos[2]) - ROCKET_LANDED_COM_Z_M) < 0.03
   assert np.linalg.norm(simulation.data.qvel[0:3]) < 0.05
   assert simulation.controller.fuel_mass_kg > 0.0
+
+
+def test_landing_legs_stay_stowed_until_terminal_descent_then_latch() -> None:
+  simulation = RocketSimulation()
+  foot_id = simulation.landing_foot_geom_ids["xp"]
+
+  assert simulation.landing_leg_deployment == 0.0
+  assert not simulation.landing_legs_deploy_commanded
+  assert simulation.model.geom_pos[foot_id] == pytest.approx(
+    np.array([2.05, 0.0, -3.10])
+  )
+  assert simulation.launch_mount_enabled
+  assert simulation.model.geom_contype[simulation.launch_mount_geom_id] > 0
+
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.ALIGN
+  simulation._update_landing_legs()
+  assert simulation.landing_leg_deployment == 0.0
+  assert not simulation.launch_mount_enabled
+
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.data.qpos[2] = (
+    ROCKET_LANDED_COM_Z_M + MPC_TERMINAL_HANDOFF_HEIGHT_M + 0.01
+  )
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation._update_landing_legs()
+  assert simulation.landing_leg_deployment == 0.0
+  assert not simulation.landing_legs_deploy_commanded
+
+  simulation.data.qpos[2] = (
+    ROCKET_LANDED_COM_Z_M + MPC_TERMINAL_HANDOFF_HEIGHT_M
+  )
+  mujoco.mj_forward(simulation.model, simulation.data)
+  half_deployment_steps = round(
+    LANDING_LEG_DEPLOYMENT_TIME_S / simulation.model.opt.timestep / 2.0
+  )
+  for _ in range(half_deployment_steps):
+    simulation._update_landing_legs()
+
+  assert simulation.landing_leg_deployment == pytest.approx(0.5)
+  assert simulation.landing_legs_deploy_commanded
+  assert simulation.model.geom_pos[foot_id] == pytest.approx(
+    np.array([5.275, 0.0, -11.74])
+  )
+
+  simulation.cancel_landing()
+  for _ in range(half_deployment_steps):
+    simulation._update_landing_legs()
+
+  assert simulation.landing_phase is LandingPhase.INACTIVE
+  assert simulation.landing_leg_deployment == pytest.approx(1.0)
+  assert simulation.model.geom_pos[foot_id] == pytest.approx(
+    np.array([8.50, 0.0, -20.38])
+  )
+
+  simulation.reset()
+  assert simulation.landing_leg_deployment == 0.0
+  assert not simulation.landing_legs_deploy_commanded
+  assert simulation.launch_mount_enabled
+  assert simulation.model.geom_pos[foot_id] == pytest.approx(
+    np.array([2.05, 0.0, -3.10])
+  )
 
 
 def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> None:

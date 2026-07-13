@@ -93,6 +93,17 @@ LANDING_STAGING_HEIGHT_M = 25.0
 LANDING_STAGING_MIN_ALTITUDE_M = (
   ROCKET_LANDED_COM_Z_M + LANDING_STAGING_HEIGHT_M
 )
+LANDING_LEG_DEPLOYMENT_TIME_S = 1.25
+LANDING_LEG_MAIN_PIVOT_RADIUS_M = 1.63
+LANDING_LEG_MAIN_PIVOT_Z_M = -13.10
+LANDING_LEG_STRUT_PIVOT_RADIUS_M = 1.72
+LANDING_LEG_STRUT_PIVOT_Z_M = -17.15
+LANDING_LEG_DEPLOYED_FOOT_RADIUS_M = 8.50
+LANDING_LEG_DEPLOYED_FOOT_Z_M = -20.38
+LANDING_LEG_STOWED_FOOT_RADIUS_M = 2.05
+LANDING_LEG_STOWED_FOOT_Z_M = -3.10
+LANDING_LEG_STOWED_STRUT_RADIUS_M = 1.92
+LANDING_LEG_STOWED_STRUT_Z_M = -11.50
 FLAME_ORIGIN_BODY_Z_M = -20.10
 ENGINE_POSITION_BODY = np.array([0.0, 0.0, FLAME_ORIGIN_BODY_Z_M])
 WINDOW_WIDTH = 1280
@@ -100,7 +111,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.16 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.17 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -142,6 +153,50 @@ class RocketSimulation:
     self.roll_rcs_xm_site_id = mujoco.mj_name2id(
       self.model, mujoco.mjtObj.mjOBJ_SITE, "roll_rcs_xm"
     )
+    self.launch_mount_geom_id = mujoco.mj_name2id(
+      self.model, mujoco.mjtObj.mjOBJ_GEOM, "launch_mount"
+    )
+    self._launch_mount_contype = int(
+      self.model.geom_contype[self.launch_mount_geom_id]
+    )
+    self._launch_mount_conaffinity = int(
+      self.model.geom_conaffinity[self.launch_mount_geom_id]
+    )
+    self.landing_leg_axes = {
+      "xp": np.array([1.0, 0.0, 0.0]),
+      "xm": np.array([-1.0, 0.0, 0.0]),
+      "yp": np.array([0.0, 1.0, 0.0]),
+      "ym": np.array([0.0, -1.0, 0.0]),
+    }
+    self.landing_leg_geom_ids = {
+      suffix: mujoco.mj_name2id(
+        self.model, mujoco.mjtObj.mjOBJ_GEOM, f"leg_{suffix}"
+      )
+      for suffix in self.landing_leg_axes
+    }
+    self.landing_strut_geom_ids = {
+      suffix: mujoco.mj_name2id(
+        self.model, mujoco.mjtObj.mjOBJ_GEOM, f"strut_{suffix}"
+      )
+      for suffix in self.landing_leg_axes
+    }
+    self.landing_foot_geom_ids = {
+      suffix: mujoco.mj_name2id(
+        self.model, mujoco.mjtObj.mjOBJ_GEOM, f"foot_{suffix}"
+      )
+      for suffix in self.landing_leg_axes
+    }
+    self._deployed_foot_quaternions = {
+      suffix: self.model.geom_quat[geom_id].copy()
+      for suffix, geom_id in self.landing_foot_geom_ids.items()
+    }
+    half_sqrt = math.sqrt(0.5)
+    self._stowed_foot_quaternions = {
+      "xp": np.array([half_sqrt, 0.0, -half_sqrt, 0.0]),
+      "xm": np.array([half_sqrt, 0.0, -half_sqrt, 0.0]),
+      "yp": np.array([half_sqrt, half_sqrt, 0.0, 0.0]),
+      "ym": np.array([half_sqrt, half_sqrt, 0.0, 0.0]),
+    }
     self.initial_body_inertia = self.model.body_inertia[
       self.rocket_body_id
     ].copy()
@@ -209,6 +264,9 @@ class RocketSimulation:
     self.hover_target_velocity = np.zeros(3, dtype=float)
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.landing_leg_deployment = 0.0
+    self.landing_legs_deploy_commanded = False
+    self.launch_mount_enabled = True
     self.fuel_takeover_triggered = False
     self.fuel_takeover_active = False
     self.last_fuel_takeover_check_time = -math.inf
@@ -224,6 +282,8 @@ class RocketSimulation:
     self.hover_target_velocity[:] = 0.0
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.landing_leg_deployment = 0.0
+    self.landing_legs_deploy_commanded = False
     self.fuel_takeover_triggered = False
     self.fuel_takeover_active = False
     self.last_fuel_takeover_check_time = -math.inf
@@ -234,6 +294,8 @@ class RocketSimulation:
     self.engine_gimbal_radians[:] = 0.0
     self.roll_control_torque_command_nm = 0.0
     self.roll_control_torque_nm = 0.0
+    self._set_landing_leg_deployment(0.0)
+    self._set_launch_mount_enabled(True)
     self._update_model_mass(force=True)
     self.hover_target_position = self.center_of_mass_position_world()
     self._update_flame()
@@ -303,6 +365,151 @@ class RocketSimulation:
       and float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
       <= MPC_TERMINAL_HANDOFF_HEIGHT_M
     )
+
+  def _set_launch_mount_enabled(self, enabled: bool) -> None:
+    """Enable the invisible reset support until the vehicle has lifted off."""
+
+    self.launch_mount_enabled = bool(enabled)
+    if self.launch_mount_enabled:
+      self.model.geom_contype[self.launch_mount_geom_id] = (
+        self._launch_mount_contype
+      )
+      self.model.geom_conaffinity[self.launch_mount_geom_id] = (
+        self._launch_mount_conaffinity
+      )
+    else:
+      self.model.geom_contype[self.launch_mount_geom_id] = 0
+      self.model.geom_conaffinity[self.launch_mount_geom_id] = 0
+
+  @staticmethod
+  def _capsule_pose_from_endpoints(
+    start: np.ndarray, end: np.ndarray
+  ) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return midpoint, +Z alignment quaternion, and half-length."""
+
+    first = np.asarray(start, dtype=float)
+    second = np.asarray(end, dtype=float)
+    delta = second - first
+    length = float(np.linalg.norm(delta))
+    if length < 1e-12:
+      return first.copy(), np.array([1.0, 0.0, 0.0, 0.0]), 0.0
+
+    direction = delta / length
+    dot = float(np.clip(direction[2], -1.0, 1.0))
+    if dot < -1.0 + 1e-10:
+      quaternion = np.array([0.0, 1.0, 0.0, 0.0])
+    else:
+      cross = np.cross(np.array([0.0, 0.0, 1.0]), direction)
+      scale = math.sqrt(max(2.0 * (1.0 + dot), 1e-12))
+      quaternion = np.array(
+        [
+          scale / 2.0,
+          cross[0] / scale,
+          cross[1] / scale,
+          cross[2] / scale,
+        ]
+      )
+    return 0.5 * (first + second), quaternion, 0.5 * length
+
+  def _set_landing_leg_deployment(self, fraction: float) -> None:
+    """Move all rendered and colliding leg geoms to one deployment state."""
+
+    deployment = float(np.clip(fraction, 0.0, 1.0))
+    self.landing_leg_deployment = deployment
+    interpolation = deployment * deployment * (3.0 - 2.0 * deployment)
+
+    for suffix, axis in self.landing_leg_axes.items():
+      main_pivot = np.array(
+        [
+          axis[0] * LANDING_LEG_MAIN_PIVOT_RADIUS_M,
+          axis[1] * LANDING_LEG_MAIN_PIVOT_RADIUS_M,
+          LANDING_LEG_MAIN_PIVOT_Z_M,
+        ]
+      )
+      strut_pivot = np.array(
+        [
+          axis[0] * LANDING_LEG_STRUT_PIVOT_RADIUS_M,
+          axis[1] * LANDING_LEG_STRUT_PIVOT_RADIUS_M,
+          LANDING_LEG_STRUT_PIVOT_Z_M,
+        ]
+      )
+      stowed_foot = np.array(
+        [
+          axis[0] * LANDING_LEG_STOWED_FOOT_RADIUS_M,
+          axis[1] * LANDING_LEG_STOWED_FOOT_RADIUS_M,
+          LANDING_LEG_STOWED_FOOT_Z_M,
+        ]
+      )
+      deployed_foot = np.array(
+        [
+          axis[0] * LANDING_LEG_DEPLOYED_FOOT_RADIUS_M,
+          axis[1] * LANDING_LEG_DEPLOYED_FOOT_RADIUS_M,
+          LANDING_LEG_DEPLOYED_FOOT_Z_M,
+        ]
+      )
+      stowed_strut_end = np.array(
+        [
+          axis[0] * LANDING_LEG_STOWED_STRUT_RADIUS_M,
+          axis[1] * LANDING_LEG_STOWED_STRUT_RADIUS_M,
+          LANDING_LEG_STOWED_STRUT_Z_M,
+        ]
+      )
+      foot_position = (
+        (1.0 - interpolation) * stowed_foot
+        + interpolation * deployed_foot
+      )
+      strut_end = (
+        (1.0 - interpolation) * stowed_strut_end
+        + interpolation * deployed_foot
+      )
+
+      leg_position, leg_quaternion, leg_half_length = (
+        self._capsule_pose_from_endpoints(main_pivot, foot_position)
+      )
+      leg_geom_id = self.landing_leg_geom_ids[suffix]
+      self.model.geom_pos[leg_geom_id] = leg_position
+      self.model.geom_quat[leg_geom_id] = leg_quaternion
+      self.model.geom_size[leg_geom_id, 1] = leg_half_length
+
+      strut_position, strut_quaternion, strut_half_length = (
+        self._capsule_pose_from_endpoints(strut_pivot, strut_end)
+      )
+      strut_geom_id = self.landing_strut_geom_ids[suffix]
+      self.model.geom_pos[strut_geom_id] = strut_position
+      self.model.geom_quat[strut_geom_id] = strut_quaternion
+      self.model.geom_size[strut_geom_id, 1] = strut_half_length
+
+      foot_geom_id = self.landing_foot_geom_ids[suffix]
+      self.model.geom_pos[foot_geom_id] = foot_position
+      self.model.geom_quat[foot_geom_id] = quaternion_slerp(
+        self._stowed_foot_quaternions[suffix],
+        self._deployed_foot_quaternions[suffix],
+        interpolation,
+      )
+
+  def _update_landing_legs(self) -> None:
+    """Latch and animate deployment during the terminal landing phase."""
+
+    height = float(self.data.qpos[2] - ROCKET_LANDED_COM_Z_M)
+    if self.launch_mount_enabled and (
+      self.landing_active or height > 0.05
+    ):
+      self._set_launch_mount_enabled(False)
+
+    if (
+      self.terminal_controller_active
+      or self.landing_phase is LandingPhase.COMPLETE
+    ):
+      self.landing_legs_deploy_commanded = True
+
+    if (
+      self.landing_legs_deploy_commanded
+      and self.landing_leg_deployment < 1.0
+    ):
+      self._set_landing_leg_deployment(
+        self.landing_leg_deployment
+        + self.model.opt.timestep / LANDING_LEG_DEPLOYMENT_TIME_S
+      )
 
   def applied_mass_properties(self) -> MassProperties:
     """Return the mass properties currently installed in MuJoCo."""
@@ -382,6 +589,7 @@ class RocketSimulation:
       return False
 
     self._invalidate_mpc_solution()
+    self._set_launch_mount_enabled(False)
 
     current_altitude = float(self.center_of_mass_position_world()[2])
     landed_com_altitude = float(self.landing_center_of_mass_position()[2])
@@ -1436,6 +1644,7 @@ class RocketSimulation:
   def step(self) -> None:
     self._check_fuel_reserve_takeover()
     self._update_landing_guidance()
+    self._update_landing_legs()
     if self.hover_enabled:
       self._update_hover_controller()
     else:
@@ -1507,6 +1716,12 @@ class RocketSimulation:
       control_line = "CTRL 6-DOF FALLBACK"
     else:
       control_line = "CTRL 6-DOF TVC"
+    if self.landing_leg_deployment >= 1.0 - 1e-9:
+      leg_line = "LEGS DEPLOYED"
+    elif self.landing_legs_deploy_commanded:
+      leg_line = f"LEGS DEPLOYING {self.landing_leg_deployment * 100:.0f}%"
+    else:
+      leg_line = "LEGS STOWED"
     return (
       (
         f"ENGINE {self.controller.engine_state.name}    "
@@ -1522,7 +1737,8 @@ class RocketSimulation:
       (
         f"{mode_line}    {control_line}    "
         f"RCS {self.roll_control_torque_nm / 1000:+5.1f} kN m    "
-        f"LAND EST {self.last_estimated_landing_fuel_kg:.0f} kg"
+        f"LAND EST {self.last_estimated_landing_fuel_kg:.0f} kg    "
+        f"{leg_line}"
       ),
       "3-D arrow: plume direction, vehicle thrust is opposite",
       "H hover | L auto-land | arrows altitude/throttle | WASD target/thrust | K kill | R reset",

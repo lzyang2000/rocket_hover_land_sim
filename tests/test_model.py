@@ -100,12 +100,29 @@ def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   )
   assert ROCKET_HEIGHT_M / ROCKET_DIAMETER_M == pytest.approx(11.26, rel=0.01)
   assert simulation.data.qpos[2] == pytest.approx(ROCKET_LANDED_COM_Z_M)
+  assert simulation.model.geom_pos[foot_id, 0] == pytest.approx(2.05)
+
+  simulation._set_landing_leg_deployment(1.0)
   assert simulation.model.geom_pos[foot_id, 0] == pytest.approx(8.50)
+
+
+def test_stowed_vehicle_remains_stable_on_the_launch_mount() -> None:
+  simulation = RocketSimulation()
+
+  for _ in range(1_000):
+    simulation.step()
+
+  assert simulation.launch_mount_enabled
+  assert simulation.landing_leg_deployment == 0.0
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 1e-3
+  assert abs(float(simulation.data.qpos[2]) - ROCKET_LANDED_COM_Z_M) < 1e-3
+  assert np.linalg.norm(simulation.data.qvel) < 0.01
 
 
 def test_headless_rollout_lifts_with_vertical_thrust() -> None:
   simulation = RocketSimulation()
   initial_altitude = float(simulation.data.qpos[2])
+  assert simulation.launch_mount_enabled
   simulation.controller.ignite()
   simulation.controller.throttle = 0.60
   altitude_changes = []
@@ -117,6 +134,8 @@ def test_headless_rollout_lifts_with_vertical_thrust() -> None:
     previous_altitude = altitude
   assert simulation.data.qpos[2] > initial_altitude + 20.0
   assert min(altitude_changes) > -0.05
+  assert not simulation.launch_mount_enabled
+  assert simulation.model.geom_contype[simulation.launch_mount_geom_id] == 0
 
 
 def test_thrust_arrow_tracks_engine_magnitude_and_gimbal_direction() -> None:

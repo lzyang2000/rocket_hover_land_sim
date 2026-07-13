@@ -330,6 +330,24 @@ MPC owns hover, alignment, and the descent above 7 m. At 7 m the controller deli
 
 Engine cutoff occurs within 0.15 m of the landed body/leg reference height when horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, and vertical speed is between -0.50 and +0.15 m/s. MuJoCo then resolves the deliberately small residual motion through landing-leg contact and pad friction rather than holding the engine on for repeated terminal corrections.
 
+### Landing-leg deployment
+
+The four legs are stowed along the fuselage in manual flight, hover, ALIGN, and high-altitude DESCEND. The deployment command latches when DESCEND reaches the same 7 m threshold used for terminal-controller handoff. Over the next 1.25 s, normalized deployment state $u$ advances from zero to one and is converted to a zero-slope smoothstep fraction
+
+\[
+s(u)=3u^2-2u^3.
+\]
+
+Each foot moves from its stowed body-frame position $p_s$ to its deployed position $p_d$:
+
+\[
+p_f=(1-s)p_s+sp_d.
+\]
+
+The main leg and folding strut are MuJoCo capsules. For endpoints $a$ and $b$, the runtime geometry uses midpoint $c=(a+b)/2$, half-length $\ell=\lVert b-a\rVert/2$, and a quaternion that rotates the capsule's local $+z$ axis onto $(b-a)/\lVert b-a\rVert$. Foot orientation is interpolated with quaternion SLERP. Because these are the actual model geoms rather than separate decorations, rendering and collision follow the same deployment state. Once started, deployment continues through cancel or abort and only reset returns it to zero.
+
+The vehicle's explicit rigid-body inertial model is intentionally unchanged by this visual/contact animation; leg articulation does not yet exchange momentum with the stage or alter its inertia tensor. Folded feet cannot support the initial vehicle, so an invisible world-fixed launch mount contacts the octaweb at reset. It is disabled permanently after the body rises 5 cm or as soon as auto-land starts, and reset restores it.
+
 ### Fuel-reserve takeover
 
 Outside auto-land, the simulator periodically estimates landing propellant from a transparent impulse approximation. For height $h$, the nominal profile time is
@@ -422,6 +440,7 @@ The test suite covers:
 - forced solver failure and fallback selection;
 - hover braking and position recovery;
 - fallback and SCvx-MPC landing/cutoff rollouts;
+- stowed, progressive, latched, and reset landing-leg deployment;
 - ground settling and mass-update teleport regression;
 - GUI controls and indicators.
 

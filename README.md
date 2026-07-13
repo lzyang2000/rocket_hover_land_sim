@@ -10,7 +10,7 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 
 - MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, moving center of mass, inertia, and contact.
 - Falcon 9 first-stage proportions: approximately 41.2 m tall, 3.66 m diameter, and 18 m deployed leg span.
-- Four grid fins, four landing legs, and a nine-engine base with the center engine shown firing during landing.
+- Four grid fins, four folding landing legs, and a nine-engine base with the center engine shown firing during landing.
 - Main-engine force applied at the physical engine pivot, producing coupled pitch/yaw torque.
 - Full quaternion attitude and heading control with a physical opposed-thruster RCS roll couple.
 - Successive-linearization 6-DOF MPC solved as conic subproblems by CVXPY and Clarabel.
@@ -86,7 +86,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.16`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.17`.
 
 ## Controls
 
@@ -175,6 +175,8 @@ The state machine supplies moving position and velocity references to the 6-DOF 
 Crossing a band boundary changes the reference directly to the next nonzero descent speed; guidance does not insert a zero-velocity hold between bands. The altitude reference remains a continuously integrated trajectory, so residual lateral alignment does not reset or jump the vertical target.
 
 Inside the optimizer, a nonzero reference velocity now advances the reference position at every prediction node. This removes the former contradiction that asked the MPC to remain at one fixed altitude while simultaneously tracking a downward velocity. MPC controls hover, alignment, and descent down to 7 m. The deterministic coupled 6-DOF controller then owns the final approach, where its direct feedback is more robust than the short-horizon optimizer under the progressively tight 3°, 1.5°, and 0.75° terminal gimbal limits.
+
+The four landing legs remain folded upward against the fuselage during reset, manual flight, hover, ALIGN, and descent above the 7 m terminal handoff. Entering terminal descent commands a latched 1.25 s deployment down and outward; it continues even if landing guidance is cancelled after deployment begins. The same moving MuJoCo geoms provide the visible legs and their collision contacts, and telemetry reports `LEGS STOWED`, deployment percentage, or `LEGS DEPLOYED`. Reset is the only command that folds them again. An invisible fixed support under the engine section holds the stowed vehicle at startup, then disables permanently at actual liftoff or when auto-land begins.
 
 While the engine is lit outside auto-land, the simulator estimates the propellant needed to align, descend through this profile, and brake excess velocity. If fuel remaining falls to `1.05 ×` that estimate while the rocket is above the end-burn cutoff height, auto-land takes over once and latches. A reserve takeover aligns at the current altitude rather than climbing to the normal staging height. The estimate is deliberately conservative and heuristic—not a certified propellant-to-go result from the MPC—and includes a fixed 100 kg terminal reserve.
 

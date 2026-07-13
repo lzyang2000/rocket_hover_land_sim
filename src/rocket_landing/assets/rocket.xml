@@ -34,6 +34,8 @@
     <geom name="landing_pad" type="cylinder" pos="0 0 0.08" size="15 0.08" material="pad"/>
     <geom name="target_outer" type="cylinder" pos="0 0 0.172" size="9.0 0.01" rgba="0.88 0.52 0.12 1" contype="0" conaffinity="0"/>
     <geom name="target_inner" type="cylinder" pos="0 0 0.184" size="7.4 0.012" rgba="0.14 0.16 0.18 1" contype="0" conaffinity="0"/>
+    <!-- Invisible launch support; disabled permanently once flight begins. -->
+    <geom name="launch_mount" type="cylinder" pos="0 0 0.61" size="1.50 0.61" rgba="0 0 0 0"/>
 
     <!--
       Body coordinates approximate a Falcon 9 first stage: 41.2 m overall
@@ -60,7 +62,7 @@
       <geom name="grid_fin_yp" type="box" pos="0 2.42 15.25" size="0.075 0.66 0.72" material="carbon" contype="0" conaffinity="0"/>
       <geom name="grid_fin_ym" type="box" pos="0 -2.42 15.25" size="0.075 0.66 0.72" material="carbon" contype="0" conaffinity="0"/>
 
-      <!-- Four deployed legs; the feet define the landed body-center height. -->
+      <!-- Canonical deployed leg geometry; Python animates it from stowed poses. -->
       <geom name="leg_xp" type="capsule" fromto="1.63 0 -13.10 8.50 0 -20.38" size="0.16" material="leg"/>
       <geom name="leg_xm" type="capsule" fromto="-1.63 0 -13.10 -8.50 0 -20.38" size="0.16" material="leg"/>
       <geom name="leg_yp" type="capsule" fromto="0 1.63 -13.10 0 8.50 -20.38" size="0.16" material="leg"/>
