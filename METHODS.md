@@ -246,16 +246,30 @@ The paper primarily presents trajectory optimization. This simulator turns that 
 4. advance the plant;
 5. shift the previous solution and solve again.
 
-The interactive launcher uses synchronous MPC by default. Each solve samples the current MuJoCo state and current GUI target, and its first command is applied before physics advances again. This removes the state/target age introduced when a background solve finishes several frames later. The tradeoff is a brief rendering and input pause during each solve. Passing `--async-mpc` restores the background worker, where the most recent valid command is held between optimizer updates. A throwaway solve before window creation pays the one-time CVXPY canonicalization cost during startup.
+The interactive launcher uses synchronous MPC by default. Each solve samples the current MuJoCo state and current GUI target, and its first command is applied before physics advances again. This removes state and target age at the cost of a brief rendering and input pause during each solve. A throwaway solve before window creation pays the one-time CVXPY canonicalization cost during startup.
+
+Passing `--async-mpc` selects a two-layer controller instead of holding delayed actuator commands:
+
+1. the background SCvx job records its request simulation time and sampled target;
+2. optimized controls are rolled through the nonlinear 6-DOF model to produce a physically consistent predicted trajectory;
+3. when the result arrives, the trajectory is sampled at its latency-compensated current point and compared with the measured position, velocity, attitude, and angular rate;
+4. results older than 0.35 s, inconsistent with the measured state, or too far from the latest target are rejected;
+5. a bounded preview point supplies position, velocity, and bounded vertical-acceleration references: 1.05 s for hover and one 0.35 s prediction interval for landing;
+6. the deterministic controller runs at every 0.005 s MuJoCo step and recomputes bounded thrust, gimbal, and roll commands.
+
+The preview reference is shifted and strongly blended toward the latest GUI or landing target. Hover uses a longer preview and moderately higher position gain for responsiveness. Landing uses one prediction interval, the original deterministic position gain, and the latest requested descent velocity for stronger alignment damping. Horizontal MPC acceleration is intentionally not used as direct feed-forward. A tall gimbaled rocket is non-minimum-phase: the engine initially counter-gimbals to rotate the stage, so the optimized early horizontal acceleration can point opposite the eventual translation. Feeding that acceleration directly into a body-direction controller caused the async loop to swing. The high-rate feedback loop instead infers the required horizontal acceleration from position and measured velocity, while retaining capped vertical feed-forward.
+
+Asynchronous MPC therefore never installs the delayed `MPCResult.control` vector. That raw first thrust/gimbal/roll command remains exclusive to synchronous mode. If no acceptable async trajectory exists, the same deterministic controller tracks the latest hover or landing target directly.
 
 Every result is checked for solver status, finite values, actuator bounds, and nonlinear rollout defect. Until the first valid solution arrives—or whenever a solve fails—the simulator uses a deterministic 6-DOF fallback controller. Failure cannot leave unconstrained or stale actuator commands active.
 
 Telemetry distinguishes:
 
 - `SCVX MPC: OPTIMAL`;
+- `SCVX MPC ASYNC+INNER: OPTIMAL`;
 - `SCVX MPC: WARMING`;
 - `6-DOF TERMINAL`;
-- `6-DOF FALLBACK`;
+- `6-DOF FALLBACK`, including async rejection reasons such as `STALE`, `STATE_MISMATCH`, or `DYNAMICS_DEFECT`;
 - manual `6-DOF TVC` control.
 
 The simulator uses a normalized nonlinear-defect acceptance limit of 0.20. This is less brittle than the previous 0.10 cutoff while remaining bounded by actuator limits and the independent MuJoCo plant. MPC gimbal authority is scheduled to 5° for hover and 6° for high-altitude landing, inside the 20° mechanical cone. The deterministic automatic controller can use the 6° envelope when stronger recovery authority is required.

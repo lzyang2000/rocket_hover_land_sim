@@ -142,7 +142,7 @@ class MPCConfig:
 
 @dataclass(frozen=True)
 class MPCResult:
-  """First receding-horizon command and solve diagnostics."""
+  """First command, nonlinear predicted trajectory, and solve diagnostics."""
 
   success: bool
   control: np.ndarray
@@ -695,7 +695,7 @@ class SixDofMPC:
     return MPCResult(
       success=success,
       control=control,
-      predicted_states=solution_states,
+      predicted_states=nonlinear_states,
       status=status,
       solve_time_seconds=time.perf_counter() - start_time,
       iterations=iterations_completed,

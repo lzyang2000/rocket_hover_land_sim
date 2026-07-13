@@ -14,6 +14,8 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 - Main-engine force applied at the physical engine pivot, producing coupled pitch/yaw torque.
 - Full quaternion attitude and heading control with a physical opposed-thruster RCS roll couple.
 - Successive-linearization 6-DOF MPC solved as conic subproblems by CVXPY and Clarabel.
+- Optional asynchronous MPC trajectory guidance with a deterministic 200 Hz
+  thrust, gimbal, and roll inner loop.
 - Gimbaled main-engine thrust constrained to a 20-degree mechanical cone.
 - Paper-inspired 20–80% throttle interval with a nonzero minimum after ignition.
 - Fuel consumption with shared dry-stage/LOX/RP-1 center-of-mass and inertia modeling in MuJoCo and MPC.
@@ -53,7 +55,15 @@ uv run rocket-landing
 
 The `dev` extra installs pytest. If you only want to run the simulator, `uv sync` is sufficient.
 
-The default launcher uses synchronous MPC so every optimized command is based on the current MuJoCo state and current GUI target. It precompiles the conic problem before opening the window, moving the one-time cold-start cost out of the first hover command. To opt back into background solving, use `uv run rocket-landing --async-mpc`.
+The default launcher uses synchronous MPC so every optimized command is based on the current MuJoCo state and current GUI target. It precompiles the conic problem before opening the window, moving the one-time cold-start cost out of the first hover command.
+
+For responsive rendering and input while the optimizer runs in the background, use:
+
+```bash
+uv run rocket-landing --async-mpc
+```
+
+In asynchronous mode the optimizer supplies a timestamped nonlinear reference trajectory. A deterministic controller runs at every 5 ms MuJoCo step, compensates for solver latency, rejects stale or inconsistent predictions, shifts guidance toward the latest GUI target, and owns the actual bounded thrust, gimbal, and roll commands. Old raw MPC actuator commands are never applied after a delayed solve.
 
 ## Setup with a standard virtual environment
 
@@ -76,7 +86,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.8`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.9`.
 
 ## Controls
 
@@ -133,6 +143,8 @@ Releasing WASD returns thrust toward vertical but does not remove existing horiz
 ### Hover hold
 
 Press `H` or click `HOVER HOLD`. The controller captures the current 3-D position and starts synchronous 6-DOF successive-convexification MPC by default. It predicts mass, position, velocity, quaternion attitude, and angular velocity over a finite horizon, then applies the first bounded thrust/gimbal/roll command before physics advances again.
+
+With `--async-mpc`, SCvx becomes the slower trajectory-guidance layer and the 200 Hz deterministic 6-DOF controller becomes the actuator layer. Telemetry reports this as `SCVX MPC ASYNC+INNER`; rejected or unavailable predictions switch immediately to `6-DOF FALLBACK` with the rejection reason when available.
 
 In hover mode:
 

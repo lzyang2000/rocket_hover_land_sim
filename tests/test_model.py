@@ -6,8 +6,18 @@ import mujoco
 import numpy as np
 import pytest
 
-from rocket_landing.mpc import MPCResult, gimbal_direction_body
+from rocket_landing.mpc import (
+  GIMBAL,
+  POSITION,
+  QUATERNION,
+  ROLL_TORQUE,
+  THRUST,
+  VELOCITY,
+  MPCResult,
+  gimbal_direction_body,
+)
 from rocket_landing.sim import (
+  ASYNC_MPC_MAX_ACCEPT_AGE_S,
   LandingPhase,
   MAX_ROLL_CONTROL_TORQUE_NM,
   ROCKET_DIAMETER_M,
@@ -20,6 +30,29 @@ from rocket_landing.sim import (
   build_argument_parser,
   model_path,
 )
+
+
+def _successful_prediction(
+  simulation: RocketSimulation,
+  *,
+  control: np.ndarray | None = None,
+  node_count: int = 2,
+) -> MPCResult:
+  states = np.repeat(simulation._mpc_state()[:, None], node_count, axis=1)
+  return MPCResult(
+    success=True,
+    control=(
+      simulation._current_actuator_control()
+      if control is None
+      else np.asarray(control, dtype=float)
+    ),
+    predicted_states=states,
+    status="optimal",
+    solve_time_seconds=0.10,
+    iterations=3,
+    scaled_dynamics_defect=0.01,
+    scaled_virtual_control=0.0,
+  )
 
 
 def test_mjcf_compiles_and_contains_free_rocket() -> None:
@@ -268,6 +301,280 @@ def test_async_mpc_uses_fallback_while_first_solution_is_pending() -> None:
   assert simulation.mpc_using_fallback
   assert simulation.controller.throttle > simulation.controller.limits.min_throttle
   simulation.close()
+
+
+def test_async_prediction_is_sampled_at_latency_compensated_time() -> None:
+  simulation = RocketSimulation()
+  result = _successful_prediction(simulation)
+  states = result.predicted_states
+  states[POSITION, 1] += np.array([2.0, 4.0, 6.0])
+  states[VELOCITY, 1] += np.array([0.7, 1.4, 2.1])
+  angle = math.radians(90.0)
+  states[QUATERNION, 1] = (
+    math.cos(angle / 2.0),
+    0.0,
+    0.0,
+    math.sin(angle / 2.0),
+  )
+
+  sampled = simulation._sample_mpc_prediction(
+    result, simulation._mpc_config.prediction_dt / 2.0
+  )
+
+  assert sampled is not None
+  state, acceleration = sampled
+  assert state[POSITION] == pytest.approx(
+    result.predicted_states[POSITION, 0] + np.array([1.0, 2.0, 3.0])
+  )
+  assert state[VELOCITY] == pytest.approx(
+    result.predicted_states[VELOCITY, 0] + np.array([0.35, 0.7, 1.05])
+  )
+  half_angle = angle / 4.0
+  assert state[QUATERNION] == pytest.approx(
+    np.array([math.cos(half_angle), 0.0, 0.0, math.sin(half_angle)])
+  )
+  assert acceleration == pytest.approx(np.array([2.0, 4.0, 6.0]))
+
+
+def test_async_result_never_applies_raw_mpc_actuator_command() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  raw_control = np.array(
+    [
+      simulation.controller.limits.max_thrust_newtons,
+      math.radians(4.0),
+      math.radians(-3.0),
+      MAX_ROLL_CONTROL_TORQUE_NM,
+    ]
+  )
+  result = _successful_prediction(simulation, control=raw_control)
+  initial_gimbal_command = np.array([0.01, -0.01])
+  simulation.engine_gimbal_command_radians[:] = initial_gimbal_command
+  simulation.roll_control_torque_command_nm = 1234.0
+
+  simulation._accept_async_mpc_result(
+    result,
+    float(simulation.data.time),
+    simulation.hover_target_position.copy(),
+    simulation.hover_target_velocity.copy(),
+  )
+
+  assert simulation.engine_gimbal_command_radians == pytest.approx(
+    initial_gimbal_command
+  )
+  assert simulation.roll_control_torque_command_nm == pytest.approx(1234.0)
+  assert simulation._track_async_mpc_trajectory()
+  assert simulation.controller.thrust_magnitude_newtons() != pytest.approx(
+    raw_control[THRUST]
+  )
+  assert simulation.engine_gimbal_command_radians != pytest.approx(
+    raw_control[GIMBAL]
+  )
+  assert simulation.roll_control_torque_command_nm != pytest.approx(
+    raw_control[ROLL_TORQUE]
+  )
+
+
+def test_async_result_rejects_stale_and_mismatched_predictions() -> None:
+  simulation = RocketSimulation()
+  result = _successful_prediction(simulation)
+  simulation.data.time = ASYNC_MPC_MAX_ACCEPT_AGE_S + 0.01
+  simulation._accept_async_mpc_result(
+    result,
+    0.0,
+    simulation.hover_target_position.copy(),
+    simulation.hover_target_velocity.copy(),
+  )
+  assert simulation._active_async_mpc_result is None
+  assert simulation.async_mpc_rejection_reason == "stale"
+
+  simulation.data.time = 0.0
+  mismatched = _successful_prediction(simulation)
+  mismatched.predicted_states[POSITION, :] += np.array([[3.0], [0.0], [0.0]])
+  simulation._accept_async_mpc_result(
+    mismatched,
+    0.0,
+    simulation.hover_target_position.copy(),
+    simulation.hover_target_velocity.copy(),
+  )
+  assert simulation._active_async_mpc_result is None
+  assert simulation.async_mpc_rejection_reason == "state_mismatch"
+
+
+def test_async_inner_loop_shifts_reference_to_latest_target() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  requested_target = simulation.hover_target_position.copy()
+  result = _successful_prediction(simulation)
+  simulation._accept_async_mpc_result(
+    result,
+    float(simulation.data.time),
+    requested_target,
+    simulation.hover_target_velocity.copy(),
+  )
+  target_delta = np.array([0.5, -0.25, 0.1])
+  simulation.hover_target_position += target_delta
+  captured: dict[str, np.ndarray] = {}
+
+  def capture_guidance(**kwargs) -> None:
+    captured.update(
+      {
+        key: np.asarray(value, dtype=float).copy()
+        for key, value in kwargs.items()
+      }
+    )
+
+  simulation._fallback_hover_guidance = capture_guidance
+  simulation._allocate_attitude_control = lambda *args, **kwargs: None
+
+  assert simulation._track_async_mpc_trajectory()
+  assert captured["target_position"] == pytest.approx(
+    result.predicted_states[POSITION, 0] + target_delta
+  )
+  assert captured["target_velocity"] == pytest.approx(
+    simulation.hover_target_velocity
+  )
+
+
+def test_async_inner_loop_keeps_all_actuator_commands_bounded() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  result = _successful_prediction(
+    simulation,
+    control=np.array([1.0e9, 1.0, -1.0, 1.0e9]),
+  )
+  result.predicted_states[VELOCITY, 1] += np.array([100.0, 0.0, 0.0])
+  simulation._accept_async_mpc_result(
+    result,
+    float(simulation.data.time),
+    simulation.hover_target_position.copy(),
+    simulation.hover_target_velocity.copy(),
+  )
+
+  assert simulation._track_async_mpc_trajectory()
+  assert (
+    simulation.controller.limits.min_throttle
+    <= simulation.controller.throttle
+    <= simulation.controller.limits.max_throttle
+  )
+  assert np.linalg.norm(simulation.engine_gimbal_command_radians) <= (
+    simulation._active_gimbal_limit_radians() + 1e-12
+  )
+  assert abs(simulation.roll_control_torque_command_nm) <= (
+    MAX_ROLL_CONTROL_TORQUE_NM
+  )
+
+
+def test_synchronous_mpc_still_applies_first_actuator_command_directly() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  raw_control = np.array(
+    [
+      0.60 * simulation.controller.limits.nominal_max_newtons,
+      math.radians(2.0),
+      math.radians(-1.0),
+      1000.0,
+    ]
+  )
+
+  class SuccessfulMPC:
+    def reset(self) -> None:
+      pass
+
+    def solve(self, state, target, previous_control):
+      del state, target, previous_control
+      return _successful_prediction(simulation, control=raw_control)
+
+  simulation.mpc = SuccessfulMPC()
+  assert simulation.enable_hover()
+  assert not simulation.mpc_using_fallback
+  assert simulation.controller.throttle == pytest.approx(0.60)
+  assert simulation.engine_gimbal_command_radians == pytest.approx(
+    raw_control[GIMBAL]
+  )
+  assert simulation.roll_control_torque_command_nm == pytest.approx(
+    raw_control[ROLL_TORQUE]
+  )
+
+
+def test_async_worker_exception_rejects_result_safely() -> None:
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+
+  class RaisingMPC:
+    def reset(self) -> None:
+      pass
+
+    def solve(self, state, target, previous_control):
+      del state, target, previous_control
+      raise RuntimeError("forced worker error")
+
+  try:
+    simulation.mpc = RaisingMPC()
+    assert simulation.enable_hover()
+    assert simulation._mpc_future is not None
+    deadline = time.monotonic() + 1.0
+    while not simulation._mpc_future.done() and time.monotonic() < deadline:
+      time.sleep(0.001)
+    simulation._poll_mpc_result()
+
+    assert simulation._mpc_future is None
+    assert simulation._mpc_future_metadata is None
+    assert simulation._active_async_mpc_result is None
+    assert simulation.mpc_using_fallback
+    assert simulation.async_mpc_rejection_reason == "worker_error"
+  finally:
+    simulation.close()
+
+
+def test_real_time_async_w_maneuver_remains_stable() -> None:
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+  maximum_horizontal_speed = 0.0
+  maximum_absolute_y = 0.0
+  active_steps = 0
+
+  try:
+    simulation.warm_up_mpc()
+    simulation.data.qpos[2] += 30.0
+    mujoco.mj_forward(simulation.model, simulation.data)
+    assert simulation.enable_hover()
+
+    for step in range(1200):
+      if step < 200:
+        simulation.move_hover_target(
+          np.array(
+            [
+              0.0,
+              2.0 * simulation.model.opt.timestep,
+              0.0,
+            ]
+          )
+        )
+      simulation.step()
+      position = simulation.center_of_mass_position_world()
+      velocity = simulation.center_of_mass_velocity_world()
+      maximum_absolute_y = max(maximum_absolute_y, abs(float(position[1])))
+      maximum_horizontal_speed = max(
+        maximum_horizontal_speed,
+        float(np.linalg.norm(velocity[0:2])),
+      )
+      if not simulation.mpc_using_fallback:
+        active_steps += 1
+      time.sleep(simulation.model.opt.timestep)
+
+    final_position = simulation.center_of_mass_position_world()
+    final_velocity = simulation.center_of_mass_velocity_world()
+    assert active_steps > 600
+    assert 0.8 < final_position[1] < 2.8
+    assert abs(float(final_velocity[1])) < 0.8
+    assert maximum_absolute_y < 3.0
+    assert maximum_horizontal_speed < 1.5
+  finally:
+    simulation.close()
 
 
 def test_kill_button_hitbox_matches_drawn_rectangle() -> None:

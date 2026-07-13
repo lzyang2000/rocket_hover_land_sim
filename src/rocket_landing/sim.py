@@ -29,6 +29,7 @@ from rocket_landing.mpc import (
   VELOCITY,
   gimbal_direction_body,
   normalize_quaternion,
+  quaternion_slerp,
 )
 
 
@@ -58,6 +59,22 @@ AUTO_LAND_TAKEOVER_MIN_HEIGHT_M = 0.15
 AUTO_LAND_FIXED_FUEL_RESERVE_KG = 100.0
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
+ASYNC_MPC_MAX_ACCEPT_AGE_S = 0.35
+ASYNC_MPC_MAX_POSITION_MISMATCH_M = 2.0
+ASYNC_MPC_MAX_VELOCITY_MISMATCH_MPS = 2.5
+ASYNC_MPC_MAX_ATTITUDE_MISMATCH_RADIANS = math.radians(15.0)
+ASYNC_MPC_MAX_ANGULAR_RATE_MISMATCH_RPS = 0.40
+ASYNC_MPC_MAX_HOVER_TARGET_SHIFT_M = 1.0
+ASYNC_MPC_MAX_LANDING_TARGET_SHIFT_M = 5.0
+ASYNC_MPC_MAX_FEEDFORWARD_ACCELERATION_MPS2 = 3.0
+ASYNC_MPC_HOVER_TRACKING_LOOKAHEAD_S = 1.05
+ASYNC_MPC_LANDING_TRACKING_LOOKAHEAD_S = 0.35
+ASYNC_MPC_HOVER_TARGET_BLEND = 0.85
+ASYNC_MPC_LANDING_TARGET_BLEND = 0.85
+ASYNC_MPC_HOVER_VELOCITY_BLEND = 1.0
+ASYNC_MPC_LANDING_VELOCITY_BLEND = 1.0
+ASYNC_MPC_HOVER_POSITION_GAIN_SCALE = 1.50
+ASYNC_MPC_LANDING_POSITION_GAIN_SCALE = 1.0
 HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
 HOVER_VELOCITY_KD = np.array([0.70, 0.70, 1.80])
 HOVER_TARGET_SPEED_MPS = 2.0
@@ -73,7 +90,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.8 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.9 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -158,11 +175,21 @@ class RocketSimulation:
       if self.asynchronous_mpc
       else None
     )
-    self._mpc_future: Future[tuple[int, MPCResult]] | None = None
+    self._mpc_future: Future[
+      tuple[int, float, np.ndarray, np.ndarray, MPCResult]
+    ] | None = None
+    self._mpc_future_metadata: (
+      tuple[int, float, np.ndarray, np.ndarray] | None
+    ) = None
     self._mpc_generation = 0
     self.last_mpc_result: MPCResult | None = None
     self.last_mpc_request_time = -math.inf
     self.mpc_using_fallback = True
+    self._active_async_mpc_result: MPCResult | None = None
+    self._active_async_mpc_request_time = -math.inf
+    self._active_async_mpc_target_position = np.zeros(3, dtype=float)
+    self._active_async_mpc_target_velocity = np.zeros(3, dtype=float)
+    self.async_mpc_rejection_reason = ""
     self.engine_gimbal_command_radians = np.zeros(2, dtype=float)
     self.engine_gimbal_radians = np.zeros(2, dtype=float)
     self.roll_control_torque_command_nm = 0.0
@@ -226,6 +253,11 @@ class RocketSimulation:
     self.last_mpc_result = None
     self.last_mpc_request_time = -math.inf
     self.mpc_using_fallback = True
+    self._active_async_mpc_result = None
+    self._active_async_mpc_request_time = -math.inf
+    self._active_async_mpc_target_position[:] = 0.0
+    self._active_async_mpc_target_velocity[:] = 0.0
+    self.async_mpc_rejection_reason = ""
     if self.mpc is not None and self._mpc_future is None:
       self.mpc.reset()
 
@@ -554,8 +586,15 @@ class RocketSimulation:
         )
       )
 
-  def _fallback_hover_guidance(self) -> None:
-    """Deterministic constrained PD guidance used if MPC is unavailable."""
+  def _fallback_hover_guidance(
+    self,
+    *,
+    target_position: np.ndarray | None = None,
+    target_velocity: np.ndarray | None = None,
+    feedforward_acceleration: np.ndarray | None = None,
+    position_gain_scale: float = 1.0,
+  ) -> None:
+    """High-rate constrained trajectory tracking and MPC fallback control."""
 
     if not self.hover_enabled:
       return
@@ -565,10 +604,26 @@ class RocketSimulation:
 
     position = self.center_of_mass_position_world()
     velocity = self.center_of_mass_velocity_world()
-    position_error = self.hover_target_position - position
-    velocity_error = self.hover_target_velocity - velocity
+    reference_position = (
+      self.hover_target_position
+      if target_position is None
+      else np.asarray(target_position, dtype=float)
+    )
+    reference_velocity = (
+      self.hover_target_velocity
+      if target_velocity is None
+      else np.asarray(target_velocity, dtype=float)
+    )
+    reference_acceleration = (
+      np.zeros(3, dtype=float)
+      if feedforward_acceleration is None
+      else np.asarray(feedforward_acceleration, dtype=float)
+    )
+    position_error = reference_position - position
+    velocity_error = reference_velocity - velocity
     desired_acceleration = (
-      HOVER_POSITION_KP * position_error
+      reference_acceleration
+      + position_gain_scale * HOVER_POSITION_KP * position_error
       + HOVER_VELOCITY_KD * velocity_error
     )
     required_force = self.controller.wet_mass_kg * (
@@ -636,12 +691,13 @@ class RocketSimulation:
   def _solve_mpc_job(
     controller: SixDofMPC,
     generation: int,
+    request_time: float,
     state: np.ndarray,
     target: np.ndarray,
     previous_control: np.ndarray,
     max_gimbal_radians: float,
     central_differences: bool,
-  ) -> tuple[int, MPCResult]:
+  ) -> tuple[int, float, np.ndarray, np.ndarray, MPCResult]:
     if isinstance(controller, SixDofMPC):
       result = controller.solve(
         state,
@@ -652,7 +708,218 @@ class RocketSimulation:
       )
     else:
       result = controller.solve(state, target, previous_control)
-    return generation, result
+    return (
+      generation,
+      request_time,
+      target[POSITION].copy(),
+      target[VELOCITY].copy(),
+      result,
+    )
+
+  def _sample_mpc_prediction(
+    self,
+    result: MPCResult,
+    elapsed_seconds: float,
+  ) -> tuple[np.ndarray, np.ndarray] | None:
+    states = np.asarray(result.predicted_states, dtype=float)
+    if states.ndim != 2 or states.shape[0] != 14 or states.shape[1] == 0:
+      return None
+    horizon_seconds = self._mpc_config.prediction_dt * (states.shape[1] - 1)
+    if elapsed_seconds < 0.0 or elapsed_seconds > horizon_seconds:
+      return None
+    if states.shape[1] == 1:
+      sampled = states[:, 0].copy()
+      sampled[QUATERNION] = normalize_quaternion(sampled[QUATERNION])
+      return sampled, np.zeros(3, dtype=float)
+    floating_index = elapsed_seconds / self._mpc_config.prediction_dt
+    lower_index = min(int(math.floor(floating_index)), states.shape[1] - 2)
+    fraction = float(np.clip(floating_index - lower_index, 0.0, 1.0))
+    sampled = (
+      (1.0 - fraction) * states[:, lower_index]
+      + fraction * states[:, lower_index + 1]
+    )
+    sampled[QUATERNION] = quaternion_slerp(
+      states[QUATERNION, lower_index],
+      states[QUATERNION, lower_index + 1],
+      fraction,
+    )
+    acceleration = (
+      states[VELOCITY, lower_index + 1]
+      - states[VELOCITY, lower_index]
+    ) / self._mpc_config.prediction_dt
+    return sampled, acceleration
+
+  def _async_prediction_matches_current_state(
+    self, predicted_state: np.ndarray
+  ) -> bool:
+    current = self._mpc_state()
+    position_mismatch = float(
+      np.linalg.norm(current[POSITION] - predicted_state[POSITION])
+    )
+    velocity_mismatch = float(
+      np.linalg.norm(current[VELOCITY] - predicted_state[VELOCITY])
+    )
+    quaternion_dot = abs(
+      float(np.dot(current[QUATERNION], predicted_state[QUATERNION]))
+    )
+    attitude_mismatch = 2.0 * math.acos(
+      float(np.clip(quaternion_dot, -1.0, 1.0))
+    )
+    angular_rate_mismatch = float(
+      np.linalg.norm(
+        current[ANGULAR_VELOCITY] - predicted_state[ANGULAR_VELOCITY]
+      )
+    )
+    return (
+      position_mismatch <= ASYNC_MPC_MAX_POSITION_MISMATCH_M
+      and velocity_mismatch <= ASYNC_MPC_MAX_VELOCITY_MISMATCH_MPS
+      and attitude_mismatch <= ASYNC_MPC_MAX_ATTITUDE_MISMATCH_RADIANS
+      and angular_rate_mismatch <= ASYNC_MPC_MAX_ANGULAR_RATE_MISMATCH_RPS
+    )
+
+  def _reject_async_mpc_result(self, result: MPCResult, reason: str) -> None:
+    self.last_mpc_result = result
+    self._active_async_mpc_result = None
+    self._active_async_mpc_request_time = -math.inf
+    self._active_async_mpc_target_position[:] = 0.0
+    self._active_async_mpc_target_velocity[:] = 0.0
+    self.mpc_using_fallback = True
+    self.async_mpc_rejection_reason = reason
+
+  def _accept_async_mpc_result(
+    self,
+    result: MPCResult,
+    request_time: float,
+    requested_target_position: np.ndarray,
+    requested_target_velocity: np.ndarray,
+  ) -> None:
+    if not result.success:
+      failure_reason = result.status
+      if (
+        result.status in ("optimal", "optimal_inaccurate")
+        and result.scaled_dynamics_defect
+        > self._mpc_config.maximum_scaled_defect
+      ):
+        failure_reason = "dynamics_defect"
+      self._reject_async_mpc_result(result, failure_reason)
+      return
+    age = float(self.data.time - request_time)
+    if age > ASYNC_MPC_MAX_ACCEPT_AGE_S:
+      self._reject_async_mpc_result(result, "stale")
+      return
+    sampled = self._sample_mpc_prediction(result, age)
+    if sampled is None or not self._async_prediction_matches_current_state(
+      sampled[0]
+    ):
+      self._reject_async_mpc_result(result, "state_mismatch")
+      return
+    target_shift = float(
+      np.linalg.norm(
+        self.hover_target_position
+        - np.asarray(requested_target_position, dtype=float)
+      )
+    )
+    maximum_target_shift = (
+      ASYNC_MPC_MAX_LANDING_TARGET_SHIFT_M
+      if self.landing_active
+      else ASYNC_MPC_MAX_HOVER_TARGET_SHIFT_M
+    )
+    if target_shift > maximum_target_shift:
+      self._reject_async_mpc_result(result, "target_shift")
+      return
+    self.last_mpc_result = result
+    self._active_async_mpc_result = result
+    self._active_async_mpc_request_time = request_time
+    self._active_async_mpc_target_position[:] = requested_target_position
+    self._active_async_mpc_target_velocity[:] = requested_target_velocity
+    self.mpc_using_fallback = False
+    self.async_mpc_rejection_reason = ""
+
+  def _track_async_mpc_trajectory(self) -> bool:
+    result = self._active_async_mpc_result
+    if result is None:
+      return False
+    elapsed = float(self.data.time - self._active_async_mpc_request_time)
+    sampled = self._sample_mpc_prediction(result, elapsed)
+    if sampled is None:
+      self._reject_async_mpc_result(result, "trajectory_expired")
+      return False
+    current_predicted_state = sampled[0]
+    if not self._async_prediction_matches_current_state(
+      current_predicted_state
+    ):
+      self._reject_async_mpc_result(result, "trajectory_mismatch")
+      return False
+    tracking_lookahead = (
+      ASYNC_MPC_LANDING_TRACKING_LOOKAHEAD_S
+      if self.landing_active
+      else ASYNC_MPC_HOVER_TRACKING_LOOKAHEAD_S
+    )
+    tracking_sample = self._sample_mpc_prediction(
+      result,
+      elapsed + tracking_lookahead,
+    )
+    if tracking_sample is None:
+      tracking_sample = sampled
+    predicted_state, feedforward_acceleration = tracking_sample
+    target_position_delta = (
+      self.hover_target_position - self._active_async_mpc_target_position
+    )
+    target_velocity_delta = (
+      self.hover_target_velocity - self._active_async_mpc_target_velocity
+    )
+    maximum_target_shift = (
+      ASYNC_MPC_MAX_LANDING_TARGET_SHIFT_M
+      if self.landing_active
+      else ASYNC_MPC_MAX_HOVER_TARGET_SHIFT_M
+    )
+    if np.linalg.norm(target_position_delta) > maximum_target_shift:
+      self._reject_async_mpc_result(result, "target_shift")
+      return False
+    reference_position = predicted_state[POSITION] + target_position_delta
+    target_blend = (
+      ASYNC_MPC_LANDING_TARGET_BLEND
+      if self.landing_active
+      else ASYNC_MPC_HOVER_TARGET_BLEND
+    )
+    reference_position += target_blend * (
+      self.hover_target_position - reference_position
+    )
+    reference_position[2] = max(
+      reference_position[2], self._mpc_config.minimum_com_height_m
+    )
+    reference_velocity = predicted_state[VELOCITY] + target_velocity_delta
+    velocity_blend = (
+      ASYNC_MPC_LANDING_VELOCITY_BLEND
+      if self.landing_active
+      else ASYNC_MPC_HOVER_VELOCITY_BLEND
+    )
+    reference_velocity += velocity_blend * (
+      self.hover_target_velocity - reference_velocity
+    )
+    feedforward_acceleration = self._limit_vector_magnitude(
+      feedforward_acceleration,
+      ASYNC_MPC_MAX_FEEDFORWARD_ACCELERATION_MPS2,
+    )
+    # Early horizontal acceleration includes counter-gimbal force used to tilt
+    # the long stage. The inner loop derives horizontal acceleration from
+    # position and measured velocity instead of treating that force as a
+    # desired body direction. Vertical feed-forward does not have this
+    # non-minimum-phase ambiguity.
+    feedforward_acceleration[0:2] = 0.0
+    self._fallback_hover_guidance(
+      target_position=reference_position,
+      target_velocity=reference_velocity,
+      feedforward_acceleration=feedforward_acceleration,
+      position_gain_scale=(
+        ASYNC_MPC_LANDING_POSITION_GAIN_SCALE
+        if self.landing_active
+        else ASYNC_MPC_HOVER_POSITION_GAIN_SCALE
+      ),
+    )
+    self._allocate_attitude_control(self.controller.thrust_direction_world())
+    self.mpc_using_fallback = False
+    return True
 
   def _set_lateral_indicator_from_world_direction(
     self, direction_world: np.ndarray
@@ -706,10 +973,28 @@ class RocketSimulation:
   def _poll_mpc_result(self) -> None:
     if self._mpc_future is None or not self._mpc_future.done():
       return
+    metadata = self._mpc_future_metadata
     try:
-      generation, result = self._mpc_future.result()
+      (
+        generation,
+        request_time,
+        requested_target_position,
+        requested_target_velocity,
+        result,
+      ) = self._mpc_future.result()
     except Exception:
-      generation = self._mpc_generation
+      if metadata is None:
+        generation = self._mpc_generation
+        request_time = float(self.last_mpc_request_time)
+        requested_target_position = self.hover_target_position.copy()
+        requested_target_velocity = self.hover_target_velocity.copy()
+      else:
+        (
+          generation,
+          request_time,
+          requested_target_position,
+          requested_target_velocity,
+        ) = metadata
       result = MPCResult(
         success=False,
         control=self._current_actuator_control(),
@@ -721,11 +1006,20 @@ class RocketSimulation:
         scaled_virtual_control=math.inf,
       )
     self._mpc_future = None
+    self._mpc_future_metadata = None
     if generation != self._mpc_generation:
       if self.mpc is not None:
         self.mpc.reset()
       return
-    self._apply_mpc_result(result)
+    if self.asynchronous_mpc:
+      self._accept_async_mpc_result(
+        result,
+        request_time,
+        requested_target_position,
+        requested_target_velocity,
+      )
+    else:
+      self._apply_mpc_result(result)
 
   def _request_mpc_solution(self) -> None:
     if self.mpc is None:
@@ -753,11 +1047,18 @@ class RocketSimulation:
       self._solve_mpc_job,
       self.mpc,
       self._mpc_generation,
+      self.last_mpc_request_time,
       state,
       target,
       previous,
       max_gimbal_radians,
       central_differences,
+    )
+    self._mpc_future_metadata = (
+      self._mpc_generation,
+      self.last_mpc_request_time,
+      target[POSITION].copy(),
+      target[VELOCITY].copy(),
     )
 
   def _update_hover_controller(self, *, force: bool = False) -> None:
@@ -782,6 +1083,13 @@ class RocketSimulation:
       and self._mpc_future is None
     ):
       self._request_mpc_solution()
+    if self.asynchronous_mpc:
+      if not self._track_async_mpc_trajectory():
+        self._fallback_hover_guidance()
+        self._allocate_attitude_control(
+          self.controller.thrust_direction_world()
+        )
+      return
     if not self.enable_mpc or self.mpc_using_fallback:
       self._fallback_hover_guidance()
       self._allocate_attitude_control(self.controller.thrust_direction_world())
@@ -1133,12 +1441,17 @@ class RocketSimulation:
       control_line = "CTRL 6-DOF TERMINAL"
     elif self.hover_enabled and self.enable_mpc:
       if self.mpc_using_fallback:
-        control_line = "CTRL 6-DOF FALLBACK"
+        fallback_detail = (
+          f": {self.async_mpc_rejection_reason.upper()}"
+          if self.async_mpc_rejection_reason
+          else ""
+        )
+        control_line = f"CTRL 6-DOF FALLBACK{fallback_detail}"
       elif self.last_mpc_result is None:
         timing = "ASYNC" if self.asynchronous_mpc else "SYNC"
         control_line = f"CTRL SCVX MPC {timing}: WARMING"
       else:
-        timing = "ASYNC" if self.asynchronous_mpc else "SYNC"
+        timing = "ASYNC+INNER" if self.asynchronous_mpc else "SYNC"
         control_line = (
           f"CTRL SCVX MPC {timing}: "
           f"{self.last_mpc_result.status.upper()}  "
@@ -1940,8 +2253,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     "--async-mpc",
     action="store_true",
     help=(
-      "solve MPC on a background worker; keeps rendering responsive but "
-      "applies commands computed from an older state"
+      "solve MPC guidance on a background worker while a deterministic "
+      "200 Hz inner loop tracks its latency-compensated trajectory"
     ),
   )
   return parser
