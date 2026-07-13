@@ -49,3 +49,35 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
   assert abs(float(simulation.data.qpos[2]) - ROCKET_LANDED_COM_Z_M) < 0.03
   assert np.linalg.norm(simulation.data.qvel[0:3]) < 0.05
   assert simulation.controller.fuel_mass_kg > 0.0
+
+
+def test_scvx_mpc_flies_terminal_descent_and_cuts_off() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  simulation.data.qpos[0:3] = (
+    0.35,
+    -0.20,
+    ROCKET_LANDED_COM_Z_M + 2.0,
+  )
+  simulation.data.qvel[0:3] = (0.10, -0.05, -0.10)
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.hover_target_position = simulation.data.qpos[0:3].copy()
+
+  saw_valid_mpc_command = False
+  for _ in range(3000):
+    simulation.step()
+    saw_valid_mpc_command |= (
+      simulation.last_mpc_result is not None
+      and simulation.last_mpc_result.success
+      and not simulation.mpc_using_fallback
+    )
+    if simulation.landing_phase is LandingPhase.COMPLETE:
+      break
+
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+  assert saw_valid_mpc_command
+  assert simulation.controller.engine_state is EngineState.SHUTDOWN
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.10
+  assert np.linalg.norm(simulation.data.qvel[0:2]) < 0.10

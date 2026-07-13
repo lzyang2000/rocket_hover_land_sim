@@ -130,7 +130,10 @@ class RocketController:
 
   def pointing_angle_deg(self) -> float:
     direction = self.thrust_direction_world()
-    return math.degrees(math.acos(float(np.clip(direction[2], -1.0, 1.0))))
+    return min(
+      math.degrees(math.acos(float(np.clip(direction[2], -1.0, 1.0)))),
+      self.limits.pointing_half_angle_deg,
+    )
 
   def consume_fuel(self, dt: float) -> float:
     """Integrate m_dot = -alpha * ||T|| and return fuel burned."""

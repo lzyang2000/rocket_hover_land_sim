@@ -1,186 +1,255 @@
-# Methods: paper model, MuJoCo implementation, and guidance laws
+# Methods: 6-DOF plant, successive-convexification MPC, and paper mapping
 
-This document explains how the simulator relates to:
+This project draws from two main references:
 
 > B. Açıkmeşe, J. M. Carson III, and L. Blackmore, “Lossless Convexification of Nonconvex Control Bound and Pointing Constraints of the Soft Landing Optimal Control Problem,” *IEEE Transactions on Control Systems Technology*, 21(6), 2013.
 
-The short version is:
+> M. Szmuk, T. P. Reynolds, and B. Açıkmeşe, “Successive Convexification for Real-Time 6-DoF Powered Descent Guidance with State-Triggered Constraints,” *Journal of Guidance, Control, and Dynamics*, 43(8), 2020. DOI: [10.2514/1.G004549](https://doi.org/10.2514/1.G004549).
 
-- The simulator directly implements the paper's translational dynamics, mass depletion, thrust-magnitude bounds, and thrust-pointing cone.
-- MuJoCo provides a free rigid body with contact, quaternion attitude, angular velocity, and landing-leg collisions.
-- Hover and auto-land currently use feedback guidance, not the paper's fuel-optimal lossless-convexification solver.
-- Attitude is controlled by a separate high-bandwidth assist torque, preserving the paper's assumption that translation and attitude can be treated as approximately decoupled.
+The 2013 paper supplies the translational soft-landing equations, mass depletion, nonzero thrust interval, and pointing-cone motivation. The 2020 paper supplies the full quaternion rigid-body model and the successive-convexification structure used by the new MPC.
+
+The implementation is an engineering adaptation rather than a reproduction of either numerical experiment. The exact controller specification and explicit non-goals are in [MPC_DESIGN.md](MPC_DESIGN.md).
 
 ## 1. Frames and state
 
 The world frame is a nonrotating local Earth frame:
 
-- `+Z`: local vertical
-- `+X`, `+Y`: horizontal directions
-- gravity: `g = [0, 0, -9.81] m/s^2`
+- `+Z`: local vertical;
+- `+X`, `+Y`: horizontal directions;
+- `g = [0, 0, -9.81] m/s^2`.
 
-The paper's translational state is
+The body frame is fixed to the rocket with `+Z` along its longitudinal axis. The paper uses a different body-axis naming convention, but the equations are equivalent after permuting axes.
+
+MuJoCo represents the free body with
 
 \[
-x(t) = \begin{bmatrix}r(t) \\ v(t)\end{bmatrix}\in\mathbb{R}^6.
+q_{MJ}=(r_x,r_y,r_z,q_w,q_x,q_y,q_z)
 \]
 
-The MuJoCo body uses a free joint:
+and generalized velocity
 
 \[
-q = (r_x,r_y,r_z,q_w,q_x,q_y,q_z),
+v_{MJ}=(v_x,v_y,v_z,\omega_x,\omega_y,\omega_z).
 \]
 
-with generalized velocity
+Thus the plant has `nq = 7` generalized coordinates and `nv = 6` mechanical degrees of freedom.
+
+The MPC prediction state follows the 2020 paper:
 
 \[
-\dot q_{minimal}=(v_x,v_y,v_z,\omega_x,\omega_y,\omega_z).
+x=(m,r,v,q,\omega)\in\mathbb{R}^{14}.
 \]
 
-Consequently, the mechanical plant has `nq = 7` coordinates and `nv = 6` velocity degrees of freedom.
+Here `q` is a scalar-first body-to-world unit quaternion and `omega` is body-frame angular velocity.
 
-## 2. Translational dynamics
+## 2. Coupled rigid-body dynamics
 
-With planetary rotation set to zero, the paper's equation reduces to
+The nonlinear prediction model is
 
 \[
-\dot r=v,
+\dot m=-\alpha T,
 \qquad
-\dot v=g+\frac{T}{m}.
+\dot r=v,
 \]
-
-MuJoCo numerically integrates these dynamics. The commanded thrust is applied as a Cartesian body force, and gravity is configured in `rocket.xml`.
-
-The current model applies thrust at the center of mass. This intentionally follows the paper's translational abstraction. A higher-fidelity model would apply thrust at the engine pivot so gimbal angle also generates a physical moment.
-
-## 3. Propellant depletion and changing mass
-
-The paper uses
 
 \[
-\dot m=-\alpha\lVert T\rVert.
+\dot v=g+\frac{1}{m}R(q)T\hat t_B,
 \]
-
-The simulator uses
 
 \[
-\alpha=5\times10^{-4},
+\dot q=\frac{1}{2}q\otimes(0,\omega),
 \]
-
-with an approximate depleted-booster landing mass of 21,000 kg dry mass and 9,000 kg initial propellant. Fuel is integrated every physics step. MuJoCo body mass and inertia are updated periodically as propellant burns.
-
-The exterior geometry follows public Falcon 9 first-stage dimensions: approximately 41.2 m high and 3.66 m in diameter. Its initial pitch/yaw inertia is approximately `4.3e6 kg m^2`, consistent with a tall 30,000 kg rigid body. These are educational approximations rather than authoritative SpaceX mass properties.
-
-`mj_setConst` evaluates the model at its reference pose, so the implementation preserves and restores position, quaternion, velocity, and simulation time around each mass recomputation. A regression test ensures mass updates cannot teleport the free body.
-
-## 4. Main-engine thrust constraints
-
-The paper's nonconvex lower bound and convex upper bound are
 
 \[
-0<\rho_1\leq\lVert T\rVert\leq\rho_2.
+J\dot\omega=r_{T,B}\times T\hat t_B+	au_r e_3
+-\omega\times J\omega.
 \]
 
-The throttle fractions are based on the paper-style example, while the force scale is multiplied by 30 to match the larger landing-condition mass:
+`R(q)` maps body-frame vectors into world coordinates. The engine pivot is approximately 20.1 m below the center of mass:
+
+\[
+r_{T,B}=(0,0,-20.1)\text{ m}.
+\]
+
+This moment arm is now present in both the optimizer and MuJoCo. The main-engine force is applied to the `thrust_origin` site through `mj_applyFT`; it is no longer applied at the center of mass. Gimbal commands therefore create physical pitch and yaw moments.
+
+A single axial engine cannot create roll torque. The bounded scalar `tau_r` models separate roll-control authority. It is deliberately explicit rather than hidden inside an unconstrained attitude-assist torque.
+
+MuJoCo remains the authoritative plant. The MPC model is propagated with RK4 over each prediction interval, and quaternions are normalized after propagation.
+
+## 3. Falcon 9-like scale and mass depletion
+
+The exterior geometry follows public Falcon 9 first-stage dimensions:
+
+- height: approximately 41.2 m;
+- diameter: 3.66 m;
+- deployed leg span: approximately 17–18 m.
+
+The landing-condition dynamics use:
+
+- initial mass: 30,000 kg;
+- dry mass: 21,000 kg;
+- initial landing propellant: 9,000 kg;
+- initial pitch/yaw inertia: approximately `4.3e6 kg m^2`;
+- initial roll inertia: approximately `6.0e4 kg m^2`.
+
+The mass equation is
+
+\[
+\dot m=-\alpha\lVert T\rVert,
+\qquad
+\alpha=5\times10^{-4}.
+\]
+
+MuJoCo mass and inertia are updated periodically as propellant burns. The MPC uses the same linear inertia-to-mass scaling as the plant.
+
+`mj_setConst` evaluates the model at its reference pose, so the implementation preserves and restores the live free-joint position, quaternion, velocity, and simulation time around every mass-property recomputation. A regression test prevents the earlier teleport behavior from returning.
+
+## 4. Thrust and actuator constraints
+
+The paper-style nonzero thrust interval is
+
+\[
+0<\rho_1\leq T\leq\rho_2,
+\]
+
+with
 
 \[
 T_{nominal}=720\text{ kN},
 \qquad
-\rho_1=0.20T_{nominal}=144\text{ kN},
+\rho_1=144\text{ kN},
 \qquad
-\rho_2=0.80T_{nominal}=576\text{ kN}.
+\rho_2=576\text{ kN}.
 \]
 
-Before ignition, thrust is exactly zero. After ignition, throttle is clipped to `[20%, 80%]`; no command exists in `(0, 20%)`. Scaling both the original 1,000 kg mass and 24 kN nominal force by 30 preserves the original translational thrust-to-weight behavior and its approximately 40.9% hover throttle.
+Before ignition, thrust is exactly zero. While lit, it cannot enter the forbidden interval between zero and 144 kN. The kill command is a deliberate hybrid transition directly from valid positive thrust to zero.
 
-These bounds are not presented as measured Merlin throttle limits. They deliberately preserve the paper experiment's nonzero lower-thrust constraint while using a Falcon 9-like force scale.
-
-The red kill control adds one deliberate hybrid transition from valid positive thrust directly to zero. That is useful for manual touchdown but relaxes the paper's stricter assumption that the descent engine cannot shut down after ignition.
-
-## 5. Gimbal and pointing constraint
-
-The pointing constraint is
+The MPC control vector is
 
 \[
-\hat n^TT\geq\lVert T\rVert\cos\theta,
+u=(T,\delta_x,\delta_y,\tau_r).
 \]
 
-where `n_hat = [0, 0, 1]` and `theta = 20 degrees` in the demo. This constrains thrust to a cone around local vertical.
-
-The two-component lateral command `c = [c_x,c_y]` is limited to `||c|| <= 1`. Its magnitude selects a gimbal angle:
+For `delta = [delta_x, delta_y]`, the unit body-frame thrust direction is
 
 \[
-\phi=\lVert c\rVert\theta,
-\]
-
-and its direction selects the horizontal direction of the thrust vector:
-
-\[
-\hat T=
+\hat t_B=
 \begin{bmatrix}
-\frac{c_x}{\lVert c\rVert}\sin\phi \\
-\frac{c_y}{\lVert c\rVert}\sin\phi \\
-\cos\phi
+\sin\lVert\delta\rVert\,\delta/\lVert\delta\rVert\\
+\cos\lVert\delta\rVert
 \end{bmatrix}.
 \]
 
-This construction satisfies the pointing cone by definition. Manual WASD commands are slew-limited before being converted into `T_hat`.
-
-## 6. Attitude-assist controller
-
-The paper explicitly decouples translational and rotational dynamics, assuming attitude control is much faster than translation. The simulator represents that assumption using
+The mechanical gimbal constraint is the second-order cone
 
 \[
-\tau=k_R(z_{body}\times\hat T)-k_\omega\omega.
+\lVert\delta\rVert_2\leq20^\circ.
 \]
 
-This torque rotates the rendered rigid body toward the desired thrust direction and damps angular velocity. It is disabled while the engine is off so it does not fight landing-leg contacts.
-
-This is not a detailed engine-actuator or reaction-control model. It is an idealized high-bandwidth attitude loop.
-
-## 7. Manual guidance
-
-In manual mode:
-
-- Up/Down changes throttle at a bounded rate.
-- WASD or the GUI directional pad commands the gimbal direction.
-- Releasing directional control slews the engine back toward vertical.
-- Horizontal momentum remains until opposite thrust or an automatic hold mode brakes it.
-
-The GUI thrust slider writes the same throttle state as the keyboard controls. Direction buttons and the slider are also indicators: they are drawn from the actual controller state rather than from mouse state.
-
-## 8. Hover/position hold
-
-Hover captures a target position and uses a PD acceleration command:
+Roll torque is bounded by
 
 \[
-a_{cmd}=K_p(r_{target}-r)-K_dv.
+|\tau_r|\leq1.5\times10^6\text{ N m}.
 \]
 
-The unconstrained thrust request is
+The GUI direction pad represents the current world-direction demand. Telemetry separately reports the actual mechanical gimbal angle and body tilt.
+
+## 5. Successive convexification
+
+The nonlinear discrete dynamics are denoted
 
 \[
-T_{request}=m(a_{cmd}-g).
+x_{k+1}=F_d(x_k,u_k).
 \]
 
-The controller then:
+At each SCvx iteration they are linearized numerically around a nominal trajectory:
 
-1. projects the requested direction into the 20-degree pointing cone;
-2. compensates thrust magnitude for the constrained direction;
-3. clips magnitude to `[rho1, rho2]`;
-4. recomputes the request as mass decreases.
+\[
+x_{k+1}\approx A_kx_k+B_ku_k+c_k+\nu_k.
+\]
 
-The velocity term provides braking. For example, during an upward climb, `-K_d v_z` reduces thrust below `mg`; gravity removes the upward velocity. Near zero velocity, thrust returns toward `mg`.
+Central finite differences produce `A_k` and `B_k`. The affine offset is
 
-In hover mode, WASD moves the horizontal target and Up/Down moves the altitude target. The GUI direction pad and thrust slider display the resulting automatic commands.
+\[
+c_k=F_d(\bar x_k,\bar u_k)-A_k\bar x_k-B_k\bar u_k.
+\]
 
-## 9. Auto-land state machine
+The virtual control `nu_k` is the artificial-infeasibility safeguard used in the SCvx literature. It receives a large scaled L1 penalty, allowing a convex subproblem to remain feasible even if a linearization is temporarily inconsistent. Valid converged solutions drive virtual control toward zero.
 
-Auto-land uses the same constrained PD controller with two guidance stages.
+Scaled trust regions bound deviations from the nominal state and control trajectories. They address artificial unboundedness and keep first-order dynamics approximations locally meaningful.
+
+## 6. Convex subproblem
+
+Each CVXPY subproblem includes:
+
+- affine linearized dynamics with virtual control;
+- lower and upper thrust bounds;
+- second-order-cone gimbal bounds;
+- bounded roll torque;
+- dry-mass and ground-height constraints;
+- maximum tilt and angular-rate constraints;
+- quaternion upper norm and linearized lower-norm safeguards;
+- scaled state and control trust regions.
+
+The cost contains:
+
+- running state-tracking error;
+- a strong terminal state penalty to prevent receding-horizon procrastination;
+- control-slew regularization;
+- small fuel-use and non-thrust actuator penalties;
+- virtual-control and trust-region penalties.
+
+Clarabel solves the conic problem. CVXPY parameters allow the compiled problem structure to be reused as dynamics matrices and target states change.
+
+The default horizon has eight intervals of 0.35 s, for a 2.8 s prediction window. Three successive-convexification iterations are performed per update. The previous solution is shifted forward as the next warm start.
+
+## 7. Receding-horizon execution and fallback
+
+The paper primarily presents trajectory optimization. This simulator turns that machinery into MPC:
+
+1. measure the MuJoCo state;
+2. solve the finite-horizon SCvx problem;
+3. apply only the first thrust, gimbal, and roll command;
+4. advance the plant;
+5. shift the previous solution and solve again.
+
+The GUI submits solves on a background worker so rendering and input remain responsive. The most recent valid command is held between optimizer updates.
+
+Every result is checked for solver status, finite values, actuator bounds, and nonlinear rollout defect. Until the first valid solution arrives—or whenever a solve fails—the simulator uses a deterministic 6-DOF fallback controller. Failure cannot leave unconstrained or stale actuator commands active.
+
+Telemetry distinguishes:
+
+- `SCVX MPC: OPTIMAL`;
+- `SCVX MPC: WARMING`;
+- `6-DOF FALLBACK`;
+- manual `6-DOF TVC` control.
+
+## 8. Manual 6-DOF control
+
+Manual WASD input defines a desired world-frame body-up direction. A full SO(3) attitude controller constructs a desired rotation with fixed heading and computes
+
+\[
+e_R=\frac{1}{2}\left(R_d^TR-R^TR_d\right)^\vee,
+\]
+
+\[
+\tau_d=-K_Re_R-K_\omega\omega.
+\]
+
+Pitch and yaw torque demands are allocated to lateral engine force using the 20.1 m lever arm. Roll torque is sent to the bounded roll actuator. Axis-specific gains account for the large difference between pitch/yaw and axial inertia.
+
+This full heading constraint fixes the former underdetermined-yaw behavior. The old controller aligned only the body vertical axis, so rotation about that axis had no restoring attitude error; the full SO(3) controller regulates all three rotational coordinates.
+
+## 9. Hover and auto-land references
+
+Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD moves the horizontal target, and Up/Down moves its altitude.
+
+Auto-land supplies references through two phases:
 
 ### Align
 
-The controller holds at least 12 m above the landed body-center height, brakes horizontal velocity, and moves above the center of the landing pad. Descent starts once horizontal position, horizontal speed, altitude, and vertical speed are within their alignment tolerances.
+The controller moves above the pad and stabilizes position, velocity, attitude, and angular rate. Descent begins after horizontal error, speed, altitude, and vertical-speed tolerances are satisfied.
 
 ### Descend
 
@@ -190,69 +259,63 @@ The target altitude moves downward at:
 - 1.0 m/s from 3 to 10 m;
 - 0.35 m/s below 3 m.
 
-Engine cutoff occurs only when the rocket is:
+Engine cutoff occurs only near the landed center-of-mass height with small horizontal error and velocity and a bounded descent rate. MuJoCo then resolves landing-leg contact and settling.
 
-- within 10 cm of the landing body height;
-- descending no faster than 0.35 m/s;
-- within 20 cm horizontally;
-- nearly stationary horizontally.
+The phase logic is intentionally separate from the optimizer. It provides interpretable reference generation while the MPC handles coupled six-degree-of-freedom tracking and actuator constraints.
 
-MuJoCo then resolves landing-leg contact and settling.
+## 10. What is and is not reproduced from the papers
 
-## 10. Relationship to lossless convexification
+Implemented:
 
-The paper does more than simulate these equations. It transforms mass and thrust variables and relaxes the nonconvex lower-thrust and pointing constraints into a convex program, then proves that the relaxation is lossless under stated conditions. That produces a fuel-optimal finite-horizon trajectory with terminal and state constraints.
+- mass, translation, quaternion, and angular-rate states;
+- rigid-body torque from thrust applied at an engine moment arm;
+- nonzero thrust and gimbal constraints;
+- repeated first-order dynamics linearization;
+- convex conic subproblems;
+- virtual control and trust regions;
+- warm starts and real-time replanning.
 
-This project does **not** currently construct or solve that second-order cone program. It uses the same plant and control constraints but obtains commands from manual input or PD feedback.
+Not implemented:
 
-A paper-faithful optimization mode would add:
+- free ignition time;
+- free final time;
+- atmospheric lift and drag;
+- velocity-triggered angle-of-attack constraints;
+- exact first-order-hold discretization matrices;
+- a proof of convergence or global optimality.
 
-- a finite prediction horizon and free or selected final time;
-- glide-slope and velocity constraints;
-- terminal position and zero-velocity constraints;
-- transformed mass/thrust variables;
-- an SOCP solver;
-- receding-horizon replanning or trajectory tracking.
+The controller is tracking-oriented rather than a pure minimum-fuel planner. It is accurately described as an SCvx-inspired 6-DOF MPC, not as the full 2020 algorithm.
 
 ## 11. Is the project 6-DOF?
 
-The answer depends on which layer is being discussed.
+Yes, with an important terminology distinction:
 
-### Mechanical simulation: yes
+- The MuJoCo plant is mechanically 6-DOF.
+- The manual and fallback controllers regulate all three translation and all three rotation coordinates.
+- The MPC predicts and controls the complete 14-state mass/6-DOF rigid-body model.
+- Main-engine translation and pitch/yaw rotation are physically coupled through the engine moment arm.
+- Roll is controlled by an explicit bounded actuator because a single axial engine cannot generate roll moment.
 
-The MuJoCo rocket is a free rigid body with:
-
-- three translational degrees of freedom;
-- three rotational degrees of freedom;
-- quaternion attitude;
-- angular velocity, inertia, torque, collision, and landing-leg contact.
-
-### Guidance model: not fully coupled 6-DOF
-
-The guidance law computes a translational thrust vector and uses an idealized attitude-assist loop to align the body. Thrust is applied at the center of mass, so gimbal-induced moments and engine-pivot dynamics are not physically coupled into translation and rotation.
-
-Therefore, the most accurate description is:
-
-> a 6-DOF MuJoCo rigid-body plant controlled by a paper-style 3-DOF translational guidance law plus idealized attitude assist.
-
-The later successive-convexification papers listed in the main README are appropriate references for upgrading the guidance layer to a fully coupled 6-DOF formulation.
+The project does not yet reproduce the paper's entire mission-level optimal-control problem, but it no longer uses a 3-DOF guidance law with an idealized pitch/yaw assist.
 
 ## 12. Verification
 
 The test suite covers:
 
 - MJCF compilation and free-joint dimensions;
-- Falcon 9-like height, diameter, and deployed-leg proportions;
-- thrust lower and upper bounds;
-- pointing-cone enforcement;
-- fuel depletion;
-- ground settling;
-- liftoff without position teleportation;
-- hover feedforward and velocity capture;
-- end-to-end pad alignment, descent, cutoff, and settling;
-- GUI hitboxes and thrust-slider behavior.
+- Falcon 9-like vehicle proportions;
+- thrust, gimbal, tilt, ground, mass, and angular-rate constraints;
+- quaternion and rigid-body prediction dynamics;
+- physical engine-pivot pitch/yaw coupling;
+- full heading and axial-spin recovery;
+- virtual-control/nonlinear-defect diagnostics;
+- forced solver failure and fallback selection;
+- hover braking and position recovery;
+- fallback and SCvx-MPC landing/cutoff rollouts;
+- ground settling and mass-update teleport regression;
+- GUI controls and indicators.
 
-Run it with:
+Run the complete suite with:
 
 ```bash
 .venv/bin/pytest -q

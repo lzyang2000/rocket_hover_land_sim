@@ -2,22 +2,26 @@
 
 An interactive powered-descent rocket simulator designed to run natively on macOS. It includes a full-scale Falcon 9 first-stage silhouette, manual gimbaled flight, position hold, automatic landing, fuel depletion, landing-leg contact, and live GUI controls.
 
-The MuJoCo vehicle is a six-degree-of-freedom rigid body. Its guidance layer is based on the translational soft-landing model and thrust constraints from Açıkmeşe, Carson, and Blackmore (2013).
+The MuJoCo vehicle and controller are six-degree-of-freedom. Thrust limits originate with Açıkmeşe, Carson, and Blackmore (2013); hover and landing use a receding-horizon adaptation of the successive-convexification method from Szmuk, Reynolds, and Açıkmeşe (2020).
 
-For equations, implementation details, and an exact paper-to-code mapping, see [METHODS.md](METHODS.md).
+For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the optimizer specification and explicit scope boundaries, see [MPC_DESIGN.md](MPC_DESIGN.md).
 
 ## What is included
 
 - MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, inertia, and contact.
 - Falcon 9 first-stage proportions: approximately 41.2 m tall, 3.66 m diameter, and 18 m deployed leg span.
 - Four grid fins, four landing legs, and a nine-engine base with the center engine shown firing during landing.
-- Gimbaled main-engine thrust constrained to a 20-degree cone.
+- Main-engine force applied at the physical engine pivot, producing coupled pitch/yaw torque.
+- Full quaternion attitude and heading control with bounded independent roll authority.
+- Successive-linearization 6-DOF MPC solved as conic subproblems by CVXPY and Clarabel.
+- Gimbaled main-engine thrust constrained to a 20-degree mechanical cone.
 - Paper-inspired 20–80% throttle interval with a nonzero minimum after ignition.
 - Fuel consumption and changing body mass/inertia.
 - Keyboard and clickable GUI flight controls.
 - Live directional indicators and a thrust slider that follow automatic guidance commands.
 - Three-dimensional hover/position hold.
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
+- Deterministic 6-DOF fallback control if an MPC solve fails.
 
 ## Requirements
 
@@ -25,7 +29,7 @@ For equations, implementation details, and an exact paper-to-code mapping, see [
 - Python 3.10 or newer.
 - An Intel or Apple Silicon Mac is supported by current MuJoCo wheels.
 
-The project has no CUDA or NVIDIA requirement.
+The project has no CUDA or NVIDIA requirement. CVXPY installs native CPU conic solvers; no external commercial solver is required.
 
 ## Setup with `uv`—recommended
 
@@ -66,7 +70,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.7`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.8`.
 
 ## Controls
 
@@ -88,11 +92,13 @@ All keyboard flight controls have clickable equivalents in the right-side GUI.
 
 ### Directional pad
 
-Click and hold a direction button exactly like holding its keyboard key. The buttons illuminate from the actual gimbal command:
+Click and hold a direction button exactly like holding its keyboard key. The buttons illuminate from the current world-direction guidance demand:
 
 - manual input produces the indicator directly;
 - hover guidance illuminates the directions used to brake and hold position;
 - auto-land illuminates the directions used to align over the pad.
+
+The telemetry line separately reports the actual mechanical gimbal angle and body tilt. During a transient, the engine may briefly counter-steer to create the torque required to rotate the long stage.
 
 The mapping is in fixed world axes, not camera-relative axes. Rotating the camera can therefore make `W` appear sideways on screen.
 
@@ -106,13 +112,13 @@ During hover and auto-land, the slider becomes read-only and changes color to in
 
 ### Manual flight
 
-Ignition jumps directly from zero to the required 20% minimum thrust. Hold Up for roughly two seconds to pass the initial Earth hover point of approximately 40.9%. WASD gimbals the engine smoothly within the pointing cone.
+Ignition jumps directly from zero to the required 20% minimum thrust. Hold Up for roughly two seconds to pass the initial Earth hover point of approximately 40.9%. WASD commands a desired world-frame flight direction. A full SO(3) attitude controller allocates that command to the physical engine gimbal and roll actuator.
 
 Releasing WASD returns thrust toward vertical but does not remove existing horizontal momentum. Counter-gimbal or enable hover to brake.
 
 ### Hover hold
 
-Press `H` or click `HOVER HOLD`. The controller captures the current 3-D position, brakes existing velocity, and continually recomputes thrust as fuel mass decreases.
+Press `H` or click `HOVER HOLD`. The controller captures the current 3-D position and starts asynchronous 6-DOF successive-convexification MPC. It predicts mass, position, velocity, quaternion attitude, and angular velocity over a finite horizon, then applies the first bounded thrust/gimbal/roll command.
 
 In hover mode:
 
@@ -120,11 +126,13 @@ In hover mode:
 - Up/Down moves the altitude target at 2 m/s;
 - releasing the controls leaves the target fixed and the controller settles there.
 
+Telemetry reports `SCVX MPC: OPTIMAL` and the latest solve time when the optimizer owns the vehicle. `6-DOF FALLBACK` means the deterministic backup controller is active.
+
 ### Automatic landing
 
 Press `L` or click `AUTO LAND`.
 
-The controller first holds altitude while braking and aligning over the pad center. It then descends at:
+The state machine supplies moving reference states to the same 6-DOF MPC. It first holds altitude while braking and aligning over the pad center, then descends at:
 
 - 2.0 m/s above 10 m;
 - 1.0 m/s between 3 and 10 m;
@@ -159,32 +167,41 @@ The 20–80% throttle interval still comes from the paper-inspired educational m
 
 ## Is it 6-DOF?
 
-Mechanically, yes:
+Yes at both the mechanical and feedback-control layers:
 
 - the MuJoCo model has a free joint with three translation and three rotation degrees of freedom;
 - attitude is represented by a quaternion;
-- angular velocity, inertia, torque, collision, and landing-leg contact are simulated.
+- angular velocity, inertia, torque, collision, and landing-leg contact are simulated;
+- engine force is applied at the gimbal pivot rather than at the center of mass;
+- gimbal force creates physical pitch/yaw moments;
+- a bounded roll actuator closes the otherwise uncontrollable axial degree of freedom;
+- MPC predicts `mass + position + velocity + quaternion + angular velocity`, a 14-state 6-DOF model.
 
-The guidance law is not yet a fully coupled 6-DOF powered-descent optimizer. It computes a translational thrust vector and uses an idealized high-bandwidth attitude-assist torque to align the body. Thrust is currently applied at the center of mass rather than at a physical gimbal pivot.
+The optimizer is a practical receding-horizon adaptation, not a verbatim reproduction of the paper's full free-final-time problem. It uses numerical dynamics linearization, trust regions, virtual control, conic thrust/gimbal/tilt/rate constraints, warm starts, and repeated replanning.
 
-The precise description is: **a 6-DOF rigid-body plant controlled by a paper-style 3-DOF translational guidance law plus attitude assist.** See [METHODS.md](METHODS.md#11-is-the-project-6-dof) for details.
+The precise description is: **a coupled 6-DOF MuJoCo plant controlled by SCvx-inspired 6-DOF MPC, with a physical gimbaled-engine moment arm and bounded roll control.**
 
 ## Relationship to the paper
 
-Implemented from the paper:
+Implemented from the 2013 and 2020 papers:
 
 - translational powered-descent dynamics;
 - mass depletion proportional to thrust magnitude;
 - nonzero lower and upper thrust bounds;
-- thrust-pointing cone;
-- point-mass/high-bandwidth-attitude approximation.
+- thrust/gimbal cone;
+- quaternion rigid-body dynamics;
+- engine-pivot torque coupling;
+- repeated dynamics linearization and conic subproblems;
+- virtual control for artificial infeasibility;
+- scaled trust regions and warm starts;
+- receding-horizon application of the first optimized command.
 
 Not yet implemented:
 
-- the lossless-convexification transformation;
-- the fuel-optimal second-order cone program;
-- glide-slope and maximum-velocity optimization constraints;
-- a fully coupled 6-DOF guidance solution.
+- free ignition and free final time;
+- atmospheric lift/drag and angle-of-attack state-triggered constraints;
+- exact first-order-hold discretization matrices;
+- formal convergence or global-optimality guarantees.
 
 Read [METHODS.md](METHODS.md) for the derivation and code correspondence.
 
@@ -208,10 +225,12 @@ uv run pytest -q
 .
 ├── README.md                         setup, controls, and operation
 ├── METHODS.md                        equations and paper-to-code mapping
+├── MPC_DESIGN.md                     MPC specification and acceptance criteria
 ├── pyproject.toml                    dependencies and command entry point
 ├── src/rocket_landing/
 │   ├── controller.py                 thrust bounds, gimbal cone, and fuel
-│   ├── sim.py                        MuJoCo loop, guidance, GUI, and rendering
+│   ├── mpc.py                        14-state SCvx MPC and nonlinear model
+│   ├── sim.py                        actuators, fallback, GUI, and rendering
 │   └── assets/rocket.xml             vehicle, pad, contacts, and visuals
 └── tests/                             physics, guidance, landing, and GUI tests
 ```
@@ -221,6 +240,10 @@ uv run pytest -q
 ### The window shows an older version
 
 Close all Python/MuJoCo simulator windows and relaunch. Existing processes retain the old code.
+
+### Hover initially says `WARMING` or `FALLBACK`
+
+The first conic solve includes one-time solver canonicalization and can take a few tenths of a second. The fallback controller remains active until a valid MPC command arrives. Warm solves are normally much faster.
 
 ### The rocket does not lift
 

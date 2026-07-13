@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum, auto
 import math
 from pathlib import Path
@@ -13,16 +14,32 @@ import mujoco
 import numpy as np
 
 from rocket_landing.controller import EngineState, RocketController
+from rocket_landing.mpc import (
+  ANGULAR_VELOCITY,
+  GIMBAL,
+  MASS,
+  MPCConfig,
+  MPCResult,
+  POSITION,
+  QUATERNION,
+  ROLL_TORQUE,
+  SixDofMPC,
+  THRUST,
+  VELOCITY,
+  gimbal_direction_body,
+  normalize_quaternion,
+)
 
 
 THROTTLE_RATE_PER_SECOND = 0.12
 LATERAL_SLEW_RATE_PER_SECOND = 1.6
-ATTITUDE_KP = 150_000_000.0
-ATTITUDE_KD = 55_000_000.0
-MAX_ASSIST_TORQUE_NM = 80_000_000.0
+ATTITUDE_KP_BODY = np.array([10_000_000.0, 10_000_000.0, 1_000_000.0])
+ATTITUDE_KD_BODY = np.array([13_000_000.0, 13_000_000.0, 350_000.0])
+MAX_ROLL_CONTROL_TORQUE_NM = 1_500_000.0
 MASS_UPDATE_PERIOD_S = 0.50
-HOVER_POSITION_KP = np.array([0.45, 0.45, 0.80])
-HOVER_VELOCITY_KD = np.array([1.20, 1.20, 1.80])
+MPC_UPDATE_PERIOD_S = 0.30
+HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
+HOVER_VELOCITY_KD = np.array([0.70, 0.70, 1.80])
 HOVER_TARGET_SPEED_MPS = 2.0
 ROCKET_HEIGHT_M = 41.2
 ROCKET_DIAMETER_M = 3.66
@@ -30,9 +47,10 @@ ROCKET_LANDED_COM_Z_M = 20.76
 LANDING_PAD_POSITION = np.array([0.0, 0.0, ROCKET_LANDED_COM_Z_M])
 LANDING_STAGING_MIN_ALTITUDE_M = ROCKET_LANDED_COM_Z_M + 12.0
 FLAME_ORIGIN_BODY_Z_M = -20.10
+ENGINE_POSITION_BODY = np.array([0.0, 0.0, FLAME_ORIGIN_BODY_Z_M])
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 820
-APP_TITLE = "MuJoCo Powered Descent Lab v0.7 - Falcon 9 proportions"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.8 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -50,7 +68,12 @@ def model_path() -> Path:
 class RocketSimulation:
   """MuJoCo plant plus the paper-inspired constrained thrust controller."""
 
-  def __init__(self) -> None:
+  def __init__(
+    self,
+    *,
+    enable_mpc: bool = False,
+    asynchronous_mpc: bool = False,
+  ) -> None:
     self.model = mujoco.MjModel.from_xml_path(str(model_path()))
     self.data = mujoco.MjData(self.model)
     self.controller = RocketController()
@@ -60,11 +83,47 @@ class RocketSimulation:
     self.flame_geom_id = mujoco.mj_name2id(
       self.model, mujoco.mjtObj.mjOBJ_GEOM, "engine_flame"
     )
+    self.thrust_site_id = mujoco.mj_name2id(
+      self.model, mujoco.mjtObj.mjOBJ_SITE, "thrust_origin"
+    )
     self.initial_body_inertia = self.model.body_inertia[
       self.rocket_body_id
     ].copy()
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
+    self.enable_mpc = enable_mpc
+    self.asynchronous_mpc = asynchronous_mpc and enable_mpc
+    self._mpc_config = MPCConfig(
+      initial_mass_kg=(
+        self.controller.dry_mass_kg + self.controller.initial_fuel_mass_kg
+      ),
+      dry_mass_kg=self.controller.dry_mass_kg,
+      initial_inertia_kgm2=tuple(float(value) for value in self.initial_body_inertia),
+      engine_position_body_m=tuple(float(value) for value in ENGINE_POSITION_BODY),
+      alpha_kg_per_newton_second=(
+        self.controller.limits.alpha_kg_per_newton_second
+      ),
+      min_thrust_newtons=self.controller.limits.min_thrust_newtons,
+      max_thrust_newtons=self.controller.limits.max_thrust_newtons,
+      max_gimbal_radians=math.radians(
+        self.controller.limits.pointing_half_angle_deg
+      ),
+      max_roll_torque_nm=MAX_ROLL_CONTROL_TORQUE_NM,
+      minimum_com_height_m=ROCKET_LANDED_COM_Z_M - 0.10,
+    )
+    self.mpc = SixDofMPC(self._mpc_config) if enable_mpc else None
+    self._mpc_executor = (
+      ThreadPoolExecutor(max_workers=1, thread_name_prefix="rocket-mpc")
+      if self.asynchronous_mpc
+      else None
+    )
+    self._mpc_future: Future[tuple[int, MPCResult]] | None = None
+    self._mpc_generation = 0
+    self.last_mpc_result: MPCResult | None = None
+    self.last_mpc_request_time = -math.inf
+    self.mpc_using_fallback = True
+    self.engine_gimbal_radians = np.zeros(2, dtype=float)
+    self.roll_control_torque_nm = 0.0
     self.hover_enabled = False
     self.hover_target_position = np.zeros(3, dtype=float)
     self.landing_phase = LandingPhase.INACTIVE
@@ -72,6 +131,7 @@ class RocketSimulation:
     self.reset()
 
   def reset(self) -> None:
+    self._invalidate_mpc_solution()
     self.controller.reset()
     mujoco.mj_resetData(self.model, self.data)
     self.hover_enabled = False
@@ -80,22 +140,39 @@ class RocketSimulation:
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
+    self.engine_gimbal_radians[:] = 0.0
+    self.roll_control_torque_nm = 0.0
     self._update_model_mass(force=True)
     self._update_flame()
     mujoco.mj_forward(self.model, self.data)
+
+  def close(self) -> None:
+    if self._mpc_executor is not None:
+      self._mpc_executor.shutdown(wait=False, cancel_futures=True)
+      self._mpc_executor = None
+
+  def _invalidate_mpc_solution(self) -> None:
+    self._mpc_generation += 1
+    self.last_mpc_result = None
+    self.last_mpc_request_time = -math.inf
+    self.mpc_using_fallback = True
+    if self.mpc is not None and self._mpc_future is None:
+      self.mpc.reset()
 
   def enable_hover(self) -> bool:
     if self.controller.engine_state is EngineState.OFF:
       self.controller.ignite()
     if self.controller.engine_state is not EngineState.LIT:
       return False
+    self._invalidate_mpc_solution()
     self.hover_target_position = self.data.qpos[0:3].copy()
     self.hover_enabled = True
     self.landing_phase = LandingPhase.INACTIVE
-    self._update_hover_controller()
+    self._update_hover_controller(force=True)
     return True
 
   def disable_hover(self) -> None:
+    self._invalidate_mpc_solution()
     self.hover_enabled = False
     self.controller.center_lateral()
     if self.landing_phase not in (LandingPhase.COMPLETE, LandingPhase.ABORTED):
@@ -111,6 +188,8 @@ class RocketSimulation:
     if self.controller.engine_state is not EngineState.LIT:
       return False
 
+    self._invalidate_mpc_solution()
+
     current_altitude = float(self.data.qpos[2])
     self.landing_staging_altitude = max(
       current_altitude, LANDING_STAGING_MIN_ALTITUDE_M
@@ -120,11 +199,12 @@ class RocketSimulation:
     )
     self.hover_enabled = True
     self.landing_phase = LandingPhase.ALIGN
-    self._update_hover_controller()
+    self._update_hover_controller(force=True)
     return True
 
   def cancel_landing(self) -> None:
     if self.landing_active:
+      self._invalidate_mpc_solution()
       self.landing_phase = LandingPhase.INACTIVE
       self.hover_target_position = self.data.qpos[0:3].copy()
       self.hover_enabled = True
@@ -141,6 +221,7 @@ class RocketSimulation:
     if not self.landing_active:
       return
     if self.controller.engine_state is not EngineState.LIT:
+      self._invalidate_mpc_solution()
       self.hover_enabled = False
       self.landing_phase = LandingPhase.ABORTED
       return
@@ -159,7 +240,7 @@ class RocketSimulation:
       aligned = (
         horizontal_error < 0.30
         and horizontal_speed < 0.20
-        and abs(position[2] - self.landing_staging_altitude) < 0.30
+        and abs(position[2] - self.landing_staging_altitude) < 0.50
         and abs(velocity[2]) < 0.25
       )
       if aligned:
@@ -180,6 +261,7 @@ class RocketSimulation:
         and horizontal_speed < 0.15
       )
       if ready_for_cutoff:
+        self._invalidate_mpc_solution()
         self.controller.kill_engine()
         self.hover_enabled = False
         self.controller.center_lateral()
@@ -189,7 +271,9 @@ class RocketSimulation:
     if self.hover_enabled:
       self.hover_target_position += np.asarray(delta_world, dtype=float)
 
-  def _update_hover_controller(self) -> None:
+  def _fallback_hover_guidance(self) -> None:
+    """Deterministic constrained PD guidance used if MPC is unavailable."""
+
     if not self.hover_enabled:
       return
     if self.controller.engine_state is not EngineState.LIT:
@@ -235,27 +319,244 @@ class RocketSimulation:
       )
     )
 
-  def _attitude_assist_torque(self, desired_up: np.ndarray) -> np.ndarray:
+  def _mpc_state(self) -> np.ndarray:
+    state = np.zeros(14, dtype=float)
+    state[MASS] = self.controller.wet_mass_kg
+    state[POSITION] = self.data.qpos[0:3]
+    state[VELOCITY] = self.data.qvel[0:3]
+    state[QUATERNION] = normalize_quaternion(self.data.qpos[3:7])
+    state[ANGULAR_VELOCITY] = self.data.qvel[3:6]
+    return state
+
+  def _mpc_target_state(self) -> np.ndarray:
+    target = self._mpc_state()
+    target[POSITION] = self.hover_target_position
+    target[VELOCITY] = 0.0
+    target[QUATERNION] = (1.0, 0.0, 0.0, 0.0)
+    target[ANGULAR_VELOCITY] = 0.0
+    return target
+
+  def _current_actuator_control(self) -> np.ndarray:
+    return np.array(
+      [
+        self.controller.thrust_magnitude_newtons(),
+        self.engine_gimbal_radians[0],
+        self.engine_gimbal_radians[1],
+        self.roll_control_torque_nm,
+      ],
+      dtype=float,
+    )
+
+  @staticmethod
+  def _solve_mpc_job(
+    controller: SixDofMPC,
+    generation: int,
+    state: np.ndarray,
+    target: np.ndarray,
+    previous_control: np.ndarray,
+  ) -> tuple[int, MPCResult]:
+    return generation, controller.solve(state, target, previous_control)
+
+  def _set_lateral_indicator_from_world_direction(
+    self, direction_world: np.ndarray
+  ) -> None:
+    direction = np.asarray(direction_world, dtype=float)
+    horizontal = direction[0:2]
+    horizontal_magnitude = float(np.linalg.norm(horizontal))
+    if horizontal_magnitude < 1e-9:
+      self.controller.center_lateral()
+      return
+    max_angle = math.radians(self.controller.limits.pointing_half_angle_deg)
+    angle = math.atan2(horizontal_magnitude, max(float(direction[2]), 1e-9))
+    self.controller.lateral_command[:] = (
+      horizontal
+      / horizontal_magnitude
+      * min(angle / max(max_angle, 1e-9), 1.0)
+    )
+
+  def _apply_mpc_result(self, result: MPCResult) -> None:
+    self.last_mpc_result = result
+    if not result.success:
+      self.mpc_using_fallback = True
+      return
+    command = result.control
+    self.controller.throttle = float(
+      np.clip(
+        command[THRUST] / self.controller.limits.nominal_max_newtons,
+        self.controller.limits.min_throttle,
+        self.controller.limits.max_throttle,
+      )
+    )
+    gimbal = np.asarray(command[GIMBAL], dtype=float).copy()
+    max_gimbal = math.radians(self.controller.limits.pointing_half_angle_deg)
+    magnitude = float(np.linalg.norm(gimbal))
+    if magnitude > max_gimbal:
+      gimbal *= max_gimbal / magnitude
+    self.engine_gimbal_radians[:] = gimbal
+    self.roll_control_torque_nm = float(
+      np.clip(
+        command[ROLL_TORQUE],
+        -MAX_ROLL_CONTROL_TORQUE_NM,
+        MAX_ROLL_CONTROL_TORQUE_NM,
+      )
+    )
     rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
-    body_up = rotation[:, 2]
-    angular_velocity_world = self.data.cvel[self.rocket_body_id, 0:3]
-    attitude_error = np.cross(body_up, desired_up)
-    torque = ATTITUDE_KP * attitude_error - ATTITUDE_KD * angular_velocity_world
-    magnitude = float(np.linalg.norm(torque))
-    if magnitude > MAX_ASSIST_TORQUE_NM:
-      torque *= MAX_ASSIST_TORQUE_NM / magnitude
-    return torque
+    self._set_lateral_indicator_from_world_direction(
+      rotation @ gimbal_direction_body(self.engine_gimbal_radians)
+    )
+    self.mpc_using_fallback = False
+
+  def _poll_mpc_result(self) -> None:
+    if self._mpc_future is None or not self._mpc_future.done():
+      return
+    try:
+      generation, result = self._mpc_future.result()
+    except Exception:
+      generation = self._mpc_generation
+      result = MPCResult(
+        success=False,
+        control=self._current_actuator_control(),
+        predicted_states=np.empty((14, 0)),
+        status="worker_error",
+        solve_time_seconds=0.0,
+        iterations=0,
+        scaled_dynamics_defect=math.inf,
+        scaled_virtual_control=math.inf,
+      )
+    self._mpc_future = None
+    if generation != self._mpc_generation:
+      if self.mpc is not None:
+        self.mpc.reset()
+      return
+    self._apply_mpc_result(result)
+
+  def _request_mpc_solution(self) -> None:
+    if self.mpc is None:
+      return
+    state = self._mpc_state()
+    target = self._mpc_target_state()
+    previous = self._current_actuator_control()
+    self.last_mpc_request_time = float(self.data.time)
+    if self._mpc_executor is None:
+      self._apply_mpc_result(self.mpc.solve(state, target, previous))
+      return
+    self._mpc_future = self._mpc_executor.submit(
+      self._solve_mpc_job,
+      self.mpc,
+      self._mpc_generation,
+      state,
+      target,
+      previous,
+    )
+
+  def _update_hover_controller(self, *, force: bool = False) -> None:
+    if not self.hover_enabled:
+      return
+    if self.controller.engine_state is not EngineState.LIT:
+      self.disable_hover()
+      return
+    self._poll_mpc_result()
+    due = (
+      force
+      or self.data.time - self.last_mpc_request_time >= MPC_UPDATE_PERIOD_S
+    )
+    if (
+      self.enable_mpc
+      and due
+      and self._mpc_future is None
+    ):
+      self._request_mpc_solution()
+    if not self.enable_mpc or self.mpc_using_fallback:
+      self._fallback_hover_guidance()
+      self._allocate_attitude_control(self.controller.thrust_direction_world())
+
+  @staticmethod
+  def _desired_attitude_rotation(desired_up: np.ndarray) -> np.ndarray:
+    body_z = np.asarray(desired_up, dtype=float)
+    body_z /= max(float(np.linalg.norm(body_z)), 1e-12)
+    heading_reference = np.array([1.0, 0.0, 0.0], dtype=float)
+    body_x = heading_reference - np.dot(heading_reference, body_z) * body_z
+    if np.linalg.norm(body_x) < 1e-6:
+      heading_reference = np.array([0.0, 1.0, 0.0], dtype=float)
+      body_x = heading_reference - np.dot(heading_reference, body_z) * body_z
+    body_x /= np.linalg.norm(body_x)
+    body_y = np.cross(body_z, body_x)
+    body_y /= np.linalg.norm(body_y)
+    body_x = np.cross(body_y, body_z)
+    return np.column_stack((body_x, body_y, body_z))
+
+  def _attitude_control_torque_body(self, desired_up: np.ndarray) -> np.ndarray:
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    desired_rotation = self._desired_attitude_rotation(desired_up)
+    error_matrix = (
+      desired_rotation.T @ rotation - rotation.T @ desired_rotation
+    )
+    attitude_error = 0.5 * np.array(
+      [error_matrix[2, 1], error_matrix[0, 2], error_matrix[1, 0]],
+      dtype=float,
+    )
+    angular_velocity_body = self.data.qvel[3:6]
+    return (
+      -ATTITUDE_KP_BODY * attitude_error
+      - ATTITUDE_KD_BODY * angular_velocity_body
+    )
+
+  def _allocate_attitude_control(self, desired_up: np.ndarray) -> None:
+    if self.controller.engine_state is not EngineState.LIT:
+      self.engine_gimbal_radians[:] = 0.0
+      self.roll_control_torque_nm = 0.0
+      return
+    desired_torque = self._attitude_control_torque_body(desired_up)
+    thrust = self.controller.thrust_magnitude_newtons()
+    lever_arm = abs(float(ENGINE_POSITION_BODY[2]))
+    requested_lateral_force = np.array(
+      [-desired_torque[1] / lever_arm, desired_torque[0] / lever_arm],
+      dtype=float,
+    )
+    max_angle = math.radians(self.controller.limits.pointing_half_angle_deg)
+    max_lateral_force = thrust * math.sin(max_angle)
+    requested_magnitude = float(np.linalg.norm(requested_lateral_force))
+    if requested_magnitude > max_lateral_force > 0.0:
+      requested_lateral_force *= max_lateral_force / requested_magnitude
+      requested_magnitude = max_lateral_force
+    if thrust <= 0.0 or requested_magnitude < 1e-9:
+      self.engine_gimbal_radians[:] = 0.0
+    else:
+      angle = math.asin(min(requested_magnitude / thrust, math.sin(max_angle)))
+      self.engine_gimbal_radians[:] = (
+        requested_lateral_force / requested_magnitude * angle
+      )
+    self.roll_control_torque_nm = float(
+      np.clip(
+        desired_torque[2],
+        -MAX_ROLL_CONTROL_TORQUE_NM,
+        MAX_ROLL_CONTROL_TORQUE_NM,
+      )
+    )
 
   def _apply_control(self) -> None:
-    thrust_direction = self.controller.thrust_direction_world()
+    self.data.qfrc_applied[:] = 0.0
     self.data.xfrc_applied[self.rocket_body_id, :] = 0.0
-    self.data.xfrc_applied[self.rocket_body_id, 0:3] = (
-      self.controller.thrust_vector_world()
+    if self.controller.engine_state is not EngineState.LIT:
+      return
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    thrust_body = (
+      self.controller.thrust_magnitude_newtons()
+      * gimbal_direction_body(self.engine_gimbal_radians)
     )
-    if self.controller.engine_state is EngineState.LIT:
-      self.data.xfrc_applied[self.rocket_body_id, 3:6] = (
-        self._attitude_assist_torque(thrust_direction)
-      )
+    force_world = rotation @ thrust_body
+    torque_world = rotation @ np.array(
+      [0.0, 0.0, self.roll_control_torque_nm], dtype=float
+    )
+    mujoco.mj_applyFT(
+      self.model,
+      self.data,
+      force_world,
+      torque_world,
+      self.data.site_xpos[self.thrust_site_id],
+      self.rocket_body_id,
+      self.data.qfrc_applied,
+    )
 
   def _update_model_mass(self, *, force: bool = False) -> None:
     current_mass = self.controller.wet_mass_kg
@@ -299,18 +600,31 @@ class RocketSimulation:
       else 0.0
     )
     half_length = 0.25 + 0.75 * normalized
+    direction_body = gimbal_direction_body(self.engine_gimbal_radians)
     self.model.geom_size[self.flame_geom_id, 1] = half_length
-    self.model.geom_pos[self.flame_geom_id, 2] = (
-      FLAME_ORIGIN_BODY_Z_M - half_length
+    self.model.geom_pos[self.flame_geom_id, :] = (
+      ENGINE_POSITION_BODY - direction_body * half_length
+    )
+    cross = np.cross(np.array([0.0, 0.0, 1.0]), direction_body)
+    dot = float(np.clip(direction_body[2], -1.0, 1.0))
+    scale = math.sqrt(max(2.0 * (1.0 + dot), 1e-12))
+    self.model.geom_quat[self.flame_geom_id, :] = (
+      scale / 2.0,
+      cross[0] / scale,
+      cross[1] / scale,
+      cross[2] / scale,
     )
     self.model.geom_rgba[self.flame_geom_id, 3] = 0.58 if lit else 0.0
 
   def step(self) -> None:
     self._update_landing_guidance()
-    self._update_hover_controller()
+    if self.hover_enabled:
+      self._update_hover_controller()
+    else:
+      self._poll_mpc_result()
+      self._allocate_attitude_control(self.controller.thrust_direction_world())
     self.controller.consume_fuel(self.model.opt.timestep)
     self._update_model_mass()
-    self._update_hover_controller()
     self._apply_control()
     self._update_flame()
     mujoco.mj_step(self.model, self.data)
@@ -338,6 +652,26 @@ class RocketSimulation:
       )
     else:
       mode_line = "MODE MANUAL"
+    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+    body_tilt = math.degrees(
+      math.acos(float(np.clip(rotation[2, 2], -1.0, 1.0)))
+    )
+    gimbal_angle = math.degrees(float(np.linalg.norm(self.engine_gimbal_radians)))
+    if self.hover_enabled and self.enable_mpc:
+      if self.mpc_using_fallback:
+        control_line = "CTRL 6-DOF FALLBACK"
+      elif self.last_mpc_result is None:
+        control_line = "CTRL SCVX MPC: WARMING"
+      else:
+        control_line = (
+          "CTRL SCVX MPC: "
+          f"{self.last_mpc_result.status.upper()}  "
+          f"{self.last_mpc_result.solve_time_seconds * 1000:.0f} ms"
+        )
+    elif self.hover_enabled:
+      control_line = "CTRL 6-DOF FALLBACK"
+    else:
+      control_line = "CTRL 6-DOF TVC"
     return (
       (
         f"ENGINE {self.controller.engine_state.name}    "
@@ -345,13 +679,13 @@ class RocketSimulation:
         f"THRUST {self.controller.thrust_magnitude_newtons() / 1000:5.1f} kN"
       ),
       (
-        f"POINTING {self.controller.pointing_angle_deg():4.1f} deg    "
+        f"GIMBAL {gimbal_angle:4.1f} deg    TILT {body_tilt:4.1f} deg    "
         f"FUEL {self.controller.fuel_mass_kg:7.1f} kg    "
         f"HEIGHT AGL {position[2] - ROCKET_LANDED_COM_Z_M:6.1f} m    "
         f"VZ {velocity[2]:6.1f} m/s"
       ),
-      mode_line,
-      "H hover | L auto-land | arrows altitude/throttle | WASD position/thrust | K kill | R reset",
+      f"{mode_line}    {control_line}",
+      "H hover | L auto-land | arrows altitude/throttle | WASD target/thrust | K kill | R reset",
     )
 
 
@@ -1010,12 +1344,13 @@ class RocketWindow:
       self.context.free()
       glfw.destroy_window(self.window)
       glfw.terminate()
+      self.simulation.close()
 
 
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.parse_args()
-  simulation = RocketSimulation()
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
   RocketWindow(simulation).run()
 
 

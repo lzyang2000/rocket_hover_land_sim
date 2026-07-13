@@ -27,7 +27,10 @@ def test_hover_brakes_velocity_and_returns_to_captured_position() -> None:
 
   assert simulation.enable_hover()
   target = simulation.hover_target_position.copy()
-  for _ in range(2800):
+  # Physical gimbal torque must first rotate the full-size stage before it can
+  # redirect translation, so recovery is intentionally slower than the former
+  # instantaneous center-of-mass force model.
+  for _ in range(5000):
     simulation.step()
 
   assert np.linalg.norm(simulation.data.qpos[0:3] - target) < 0.05

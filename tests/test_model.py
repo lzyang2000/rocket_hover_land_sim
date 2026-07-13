@@ -1,8 +1,12 @@
+import math
+import time
+
 import glfw
 import mujoco
 import numpy as np
 import pytest
 
+from rocket_landing.mpc import MPCResult
 from rocket_landing.sim import (
   ROCKET_DIAMETER_M,
   ROCKET_HEIGHT_M,
@@ -52,6 +56,87 @@ def test_headless_rollout_lifts_with_vertical_thrust() -> None:
     previous_altitude = altitude
   assert simulation.data.qpos[2] > initial_altitude + 20.0
   assert min(altitude_changes) > -0.05
+
+
+def test_powered_six_dof_controller_removes_axial_spin_and_tilt_rates() -> None:
+  simulation = RocketSimulation()
+  yaw = math.radians(12.0)
+  simulation.data.qpos[3:7] = (
+    math.cos(yaw / 2.0),
+    0.0,
+    0.0,
+    math.sin(yaw / 2.0),
+  )
+  simulation.data.qvel[3:6] = (0.03, -0.02, 0.12)
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  simulation.controller.throttle = 0.60
+
+  for _ in range(2000):
+    simulation.step()
+
+  assert np.linalg.norm(simulation.data.qvel[3:6]) < 1e-5
+  assert abs(float(simulation.data.qpos[3]) - 1.0) < 1e-5
+  assert np.linalg.norm(simulation.engine_gimbal_radians) < 1e-5
+
+
+def test_solver_failure_selects_safe_six_dof_fallback() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+
+  class FailingMPC:
+    def reset(self) -> None:
+      pass
+
+    def solve(self, state, target, previous_control):
+      del state, target
+      return MPCResult(
+        success=False,
+        control=previous_control,
+        predicted_states=np.empty((14, 0)),
+        status="forced_failure",
+        solve_time_seconds=0.0,
+        iterations=0,
+        scaled_dynamics_defect=math.inf,
+        scaled_virtual_control=math.inf,
+      )
+
+  simulation.mpc = FailingMPC()
+  assert simulation.enable_hover()
+  assert simulation.mpc_using_fallback
+  for _ in range(100):
+    simulation.step()
+
+  assert simulation.controller.engine_state.name == "LIT"
+  assert np.linalg.norm(simulation.engine_gimbal_radians) <= math.radians(20.0)
+
+
+def test_async_mpc_uses_fallback_while_first_solution_is_pending() -> None:
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+
+  class SlowMPC:
+    def reset(self) -> None:
+      pass
+
+    def solve(self, state, target, previous_control):
+      del state, target
+      time.sleep(0.05)
+      return MPCResult(
+        success=False,
+        control=previous_control,
+        predicted_states=np.empty((14, 0)),
+        status="delayed_failure",
+        solve_time_seconds=0.05,
+        iterations=0,
+        scaled_dynamics_defect=math.inf,
+        scaled_virtual_control=math.inf,
+      )
+
+  simulation.mpc = SlowMPC()
+  assert simulation.enable_hover()
+  assert simulation._mpc_future is not None
+  assert simulation.mpc_using_fallback
+  assert simulation.controller.throttle > simulation.controller.limits.min_throttle
+  simulation.close()
 
 
 def test_kill_button_hitbox_matches_drawn_rectangle() -> None:
