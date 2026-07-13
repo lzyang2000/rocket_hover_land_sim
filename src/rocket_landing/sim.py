@@ -61,6 +61,8 @@ LANDING_DESCENT_CAPTURE_MAX_RADIUS_M = 8.0
 LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS = 1.0
 LANDING_DESCENT_CAPTURE_ALTITUDE_ERROR_M = 2.0
 LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS = 1.5
+LANDING_HIGH_ALTITUDE_ALIGN_MAX_HOLD_S = 5.0
+LANDING_DESCENT_MIN_ALIGNMENT_RATE_SCALE = 0.25
 MPC_TERMINAL_HANDOFF_HEIGHT_M = 7.0
 AUTO_LAND_FUEL_MARGIN = 1.05
 AUTO_LAND_FUEL_CHECK_PERIOD_S = 0.25
@@ -99,7 +101,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.12 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.13 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -208,6 +210,7 @@ class RocketSimulation:
     self.hover_target_velocity = np.zeros(3, dtype=float)
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.landing_align_start_time = 0.0
     self.fuel_takeover_triggered = False
     self.fuel_takeover_active = False
     self.last_fuel_takeover_check_time = -math.inf
@@ -223,6 +226,7 @@ class RocketSimulation:
     self.hover_target_velocity[:] = 0.0
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.landing_align_start_time = 0.0
     self.fuel_takeover_triggered = False
     self.fuel_takeover_active = False
     self.last_fuel_takeover_check_time = -math.inf
@@ -393,6 +397,7 @@ class RocketSimulation:
     self.hover_target_velocity[:] = 0.0
     self.hover_enabled = True
     self.landing_phase = LandingPhase.ALIGN
+    self.landing_align_start_time = float(self.data.time)
     self.fuel_takeover_active = fuel_takeover
     if fuel_takeover:
       self.fuel_takeover_triggered = True
@@ -579,13 +584,21 @@ class RocketSimulation:
         )
       )
       capture_radius = self.descent_capture_radius_for_height_m(height)
+      align_timed_out = (
+        height > LANDING_DESCENT_CAPTURE_REFERENCE_HEIGHT_M
+        and self.data.time - self.landing_align_start_time
+        >= LANDING_HIGH_ALTITUDE_ALIGN_MAX_HOLD_S
+      )
       aligned = (
-        horizontal_error < capture_radius
-        and horizontal_speed
-        < LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS
-        and abs(position[2] - self.landing_staging_altitude)
-        < LANDING_DESCENT_CAPTURE_ALTITUDE_ERROR_M
-        and abs(velocity[2]) < LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS
+        (
+          horizontal_error < capture_radius
+          and horizontal_speed
+          < LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS
+          and abs(position[2] - self.landing_staging_altitude)
+          < LANDING_DESCENT_CAPTURE_ALTITUDE_ERROR_M
+          and abs(velocity[2]) < LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS
+        )
+        or align_timed_out
       )
       if aligned:
         self.landing_phase = LandingPhase.DESCEND
@@ -597,7 +610,29 @@ class RocketSimulation:
         horizontal_lead,
       )
       previous_target_z = float(self.hover_target_position[2])
-      requested_rate = self._descent_rate_mps()
+      capture_radius = self.descent_capture_radius_for_height_m(height)
+      position_rate_scale = float(
+        np.clip(
+          capture_radius / max(horizontal_error, capture_radius),
+          LANDING_DESCENT_MIN_ALIGNMENT_RATE_SCALE,
+          1.0,
+        )
+      )
+      speed_rate_scale = float(
+        np.clip(
+          LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS
+          / max(
+            horizontal_speed,
+            LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS,
+          ),
+          LANDING_DESCENT_MIN_ALIGNMENT_RATE_SCALE,
+          1.0,
+        )
+      )
+      requested_rate = self._descent_rate_mps() * min(
+        position_rate_scale,
+        speed_rate_scale,
+      )
       next_target_z = max(
         landed_com_position[2],
         previous_target_z - requested_rate * self.model.opt.timestep,
