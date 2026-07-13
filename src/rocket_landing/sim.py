@@ -73,7 +73,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.7 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.8 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -1335,6 +1335,27 @@ class RocketWindow:
       limits.max_throttle - limits.min_throttle
     )
 
+  def _thrust_display_values(self) -> tuple[float, float, str]:
+    controller = self.simulation.controller
+    if controller.engine_state is not EngineState.LIT:
+      return 0.0, 0.0, "OFF"
+    displayed_throttle = controller.throttle
+    limits = controller.limits
+    slider_fraction = float(
+      np.clip(
+        (displayed_throttle - limits.min_throttle)
+        / (limits.max_throttle - limits.min_throttle),
+        0.0,
+        1.0,
+      )
+    )
+    owner = (
+      "AUTO"
+      if self.simulation.hover_enabled or self.simulation.landing_active
+      else "MANUAL"
+    )
+    return displayed_throttle, slider_fraction, owner
+
   @staticmethod
   def _direction_button_levels(command: np.ndarray) -> dict[str, float]:
     x_command, y_command = np.asarray(command, dtype=float)
@@ -1755,14 +1776,8 @@ class RocketWindow:
       int(slider_width * scale_x),
       int(slider_height * scale_y),
     )
-    limits = self.simulation.controller.limits
-    slider_fraction = float(
-      np.clip(
-        (self.simulation.controller.throttle - limits.min_throttle)
-        / (limits.max_throttle - limits.min_throttle),
-        0.0,
-        1.0,
-      )
+    displayed_throttle, slider_fraction, slider_owner = (
+      self._thrust_display_values()
     )
     mujoco.mjr_rectangle(slider_rect, 0.10, 0.12, 0.15, 0.96)
     fill_rect = mujoco.MjrRect(
@@ -1798,12 +1813,11 @@ class RocketWindow:
       int(slider_width * scale_x),
       int(30.0 * scale_y),
     )
-    slider_owner = "AUTO" if autopilot_owns_thrust else "MANUAL"
     mujoco.mjr_overlay(
       mujoco.mjtFont.mjFONT_NORMAL,
       mujoco.mjtGridPos.mjGRID_TOPLEFT,
       slider_label_rect,
-      f"THRUST {self.simulation.controller.throttle * 100:.1f}%  {slider_owner}",
+      f"THRUST {displayed_throttle * 100:.1f}%  {slider_owner}",
       "",
       self.context,
     )

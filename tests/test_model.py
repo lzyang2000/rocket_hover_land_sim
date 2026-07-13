@@ -370,6 +370,23 @@ def test_gui_thrust_slider_maps_limits_and_becomes_read_only_in_hover() -> None:
   )
 
 
+def test_thrust_display_returns_to_zero_when_engine_is_not_lit() -> None:
+  window = RocketWindow.__new__(RocketWindow)
+  window.simulation = RocketSimulation()
+
+  assert window._thrust_display_values() == (0.0, 0.0, "OFF")
+
+  window.simulation.controller.ignite()
+  window.simulation.controller.throttle = 0.60
+  displayed_throttle, slider_fraction, owner = window._thrust_display_values()
+  assert displayed_throttle == pytest.approx(0.60)
+  assert slider_fraction == pytest.approx(2.0 / 3.0)
+  assert owner == "MANUAL"
+
+  window.simulation.controller.kill_engine()
+  assert window._thrust_display_values() == (0.0, 0.0, "OFF")
+
+
 def test_direction_indicator_levels_match_gimbal_command() -> None:
   levels = RocketWindow._direction_button_levels(np.array([0.4, -0.7]))
   assert levels == {"W": 0.0, "A": 0.0, "S": 0.7, "D": 0.4}

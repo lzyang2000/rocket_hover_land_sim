@@ -76,7 +76,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.7`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.8`.
 
 ## Controls
 
@@ -113,6 +113,8 @@ The mapping is in fixed world axes, not camera-relative axes. Rotating the camer
 In manual mode, click or drag the slider to command any throttle from 20% to 80%. Moving the slider automatically ignites an engine that is still off.
 
 During hover and auto-land, the slider becomes read-only and changes color to indicate automatic ownership. Its knob follows the throttle actually commanded by guidance, including mass compensation and braking.
+
+When the engine is off, killed, fuel-depleted, or shut down after landing, the slider returns to its zero position and reads `THRUST 0.0% OFF` rather than retaining the last powered throttle command.
 
 ### 3-D thrust arrow
 
