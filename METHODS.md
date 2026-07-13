@@ -401,6 +401,29 @@ t_a=\max\left(
 \right)+2.5\ \mathrm{s}.
 \]
 
+There are two takeover branches. If the stage is above 32 m, within 0.75 m of the pad axis, below 0.5 m/s horizontal speed, below 2.5 degrees tilt, and below 0.12 rad/s angular rate, powered alignment is unnecessary. The engine can enter relightable coast immediately. With ballistic apex
+
+\[
+h_a=h+\frac{\max(v_z,0)^2}{2g},
+\]
+
+the same ignition intersection gives powered height $h_p$ and ignition speed $v_C$. The direct-coast estimate is
+
+\[
+m_{f,D}=\gamma(v_z)\,\alpha m
+\left[g\,t_{d,C}(h_p)+v_C+\lVert v_{xy}\rVert\right]+50\ \mathrm{kg},
+\]
+
+where
+
+\[
+\gamma(v_z)=\max\left(0.89,\;0.95-0.0006\max(v_z,0)\right).
+\]
+
+The factor approximates mass depletion over the long burn and was calibrated against deterministic full-flight rollouts. The normal external 1.05 takeover multiplier still applies. A full-throttle vertical launch crosses this estimate near 5.15 tonnes and finishes near 70 kg; a stationary 1,000 m case crosses near 4.0 tonnes and finishes near 45 kg.
+
+If direct coast is unsafe because lateral or attitude correction is still required, the estimator retains the powered-alignment branch below.
+
 For a staging height $h_s$ above 32 m, the estimator finds powered-descent height $h_p$ from the ballistic intersection
 
 \[
@@ -433,7 +456,7 @@ When the engine is lit, the rocket is above the end-burn cutoff height, and rema
 m_f\leq 1.05\,m_{f,\mathrm{land}},
 \]
 
-auto-land takes over and the trigger latches for the flight. The threshold is capped at the initial 9,000 kg reserve, so an already marginal state requests landing immediately. Reserve takeover uses the current altitude as its alignment altitude, avoiding an unnecessary climb to the normal staging height, except where upward momentum requires a higher braking apex. The coast-aware impulse margins and retuned controllability floor are empirical guards for this controller, not an MPC-derived certified propellant-to-go bound.
+auto-land takes over and the trigger latches for the flight. The threshold is capped at the initial 9,000 kg reserve, so an already marginal state requests landing immediately. Eligible direct-coast states shut down immediately and use their ballistic apex; other reserve takeovers use the current altitude as the powered alignment target except where upward momentum requires a higher braking apex. Both estimator branches are empirical guards for this controller, not MPC-derived certified propellant-to-go bounds.
 
 ### Controller ownership indicator
 

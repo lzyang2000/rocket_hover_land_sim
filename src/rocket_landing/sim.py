@@ -72,6 +72,12 @@ AUTO_LAND_CONTROL_IMPULSE_MARGIN = 1.10
 AUTO_LAND_MINIMUM_TAKEOVER_FUEL_KG = 5_500.0
 AUTO_LAND_HEIGHT_RESERVE_KG_PER_M = 25.0
 AUTO_LAND_HORIZONTAL_RESERVE_KG_PER_M = 320.0
+AUTO_LAND_DIRECT_COAST_FIXED_RESERVE_KG = 50.0
+AUTO_LAND_DIRECT_COAST_MAX_IMPULSE_FACTOR = 0.95
+AUTO_LAND_DIRECT_COAST_MIN_IMPULSE_FACTOR = 0.89
+AUTO_LAND_DIRECT_COAST_FACTOR_PER_UPWARD_MPS = 0.0006
+AUTO_LAND_DIRECT_COAST_MAX_HORIZONTAL_ERROR_M = 0.75
+AUTO_LAND_DIRECT_COAST_MAX_HORIZONTAL_SPEED_MPS = 0.50
 COAST_MIN_ENTRY_HEIGHT_M = 32.0
 COAST_MIN_ALTITUDE_SAVING_M = 5.0
 COAST_ENTRY_MAX_TILT_RADIANS = math.radians(2.5)
@@ -137,7 +143,7 @@ GUI_PANEL_MARGIN = 22.0
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.21 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.22 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -678,11 +684,29 @@ class RocketSimulation:
     self.hover_target_position = self.center_of_mass_position_world()
     self.hover_target_velocity[:] = 0.0
     self.hover_enabled = True
-    self.landing_phase = LandingPhase.ALIGN
     self.landing_burn_from_coast = False
     self.fuel_takeover_active = fuel_takeover
     if fuel_takeover:
       self.fuel_takeover_triggered = True
+    if fuel_takeover and self._direct_fuel_takeover_coast_eligible():
+      position = self.center_of_mass_position_world()
+      velocity = self.center_of_mass_velocity_world()
+      landed_position = self.landing_center_of_mass_position()
+      gravity = abs(float(self.model.opt.gravity[2]))
+      height = max(float(position[2] - landed_position[2]), 0.0)
+      ballistic_apex_height = height + (
+        max(float(velocity[2]), 0.0) ** 2 / (2.0 * gravity)
+      )
+      self.landing_staging_altitude = (
+        landed_position[2] + ballistic_apex_height
+      )
+      self.hover_target_position = landed_position.copy()
+      self.hover_target_position[2] += self.landing_burn_altitude_m(0.0)
+      self.controller.center_lateral()
+      if self.controller.begin_coast():
+        self.landing_phase = LandingPhase.COAST
+        return True
+    self.landing_phase = LandingPhase.ALIGN
     self._update_hover_controller(force=True)
     return True
 
@@ -783,6 +807,9 @@ class RocketSimulation:
   def estimated_landing_fuel_kg(self) -> float:
     """Estimate remaining propellant required to align, descend, and brake."""
 
+    if self._direct_fuel_takeover_coast_eligible():
+      return self.estimated_direct_coast_landing_fuel_kg()
+
     position = self.center_of_mass_position_world()
     velocity = self.center_of_mass_velocity_world()
     landed_com_altitude = float(self.landing_center_of_mass_position()[2])
@@ -846,6 +873,63 @@ class RocketSimulation:
     )
     controllability_floor = minimum_takeover_fuel / AUTO_LAND_FUEL_MARGIN
     return max(impulse_estimate, controllability_floor)
+
+  def _direct_fuel_takeover_coast_eligible(self) -> bool:
+    """Return whether fuel takeover may skip powered alignment entirely."""
+
+    position = self.center_of_mass_position_world()
+    velocity = self.center_of_mass_velocity_world()
+    landed_position = self.landing_center_of_mass_position()
+    height = float(position[2] - landed_position[2])
+    return (
+      height >= COAST_MIN_ENTRY_HEIGHT_M
+      and float(np.linalg.norm(position[0:2] - landed_position[0:2]))
+      < AUTO_LAND_DIRECT_COAST_MAX_HORIZONTAL_ERROR_M
+      and float(np.linalg.norm(velocity[0:2]))
+      < AUTO_LAND_DIRECT_COAST_MAX_HORIZONTAL_SPEED_MPS
+      and self._body_tilt_radians() < COAST_ENTRY_MAX_TILT_RADIANS
+      and float(np.linalg.norm(self.data.qvel[3:6]))
+      < COAST_ENTRY_MAX_ANGULAR_RATE_RPS
+    )
+
+  def estimated_direct_coast_landing_fuel_kg(self) -> float:
+    """Estimate a no-alignment ballistic coast followed by one landing burn."""
+
+    position = self.center_of_mass_position_world()
+    velocity = self.center_of_mass_velocity_world()
+    landed_position = self.landing_center_of_mass_position()
+    gravity = abs(float(self.model.opt.gravity[2]))
+    height = max(float(position[2] - landed_position[2]), 0.0)
+    upward_speed = max(float(velocity[2]), 0.0)
+    ballistic_apex_height = height + upward_speed * upward_speed / (
+      2.0 * gravity
+    )
+    powered_height = self.estimated_powered_descent_height_m(
+      ballistic_apex_height
+    )
+    powered_time = self.estimated_coast_burn_time_seconds(powered_height)
+    ignition_speed = math.sqrt(
+      max(
+        2.0 * gravity * (ballistic_apex_height - powered_height),
+        0.0,
+      )
+    )
+    impulse_factor = max(
+      AUTO_LAND_DIRECT_COAST_MIN_IMPULSE_FACTOR,
+      AUTO_LAND_DIRECT_COAST_MAX_IMPULSE_FACTOR
+      - AUTO_LAND_DIRECT_COAST_FACTOR_PER_UPWARD_MPS * upward_speed,
+    )
+    required_impulse = self.controller.wet_mass_kg * (
+      gravity * powered_time
+      + ignition_speed
+      + float(np.linalg.norm(velocity[0:2]))
+    )
+    return float(
+      impulse_factor
+      * self.controller.limits.alpha_kg_per_newton_second
+      * required_impulse
+      + AUTO_LAND_DIRECT_COAST_FIXED_RESERVE_KG
+    )
 
   def landing_burn_altitude_m(self, downward_speed_mps: float) -> float:
     """Return the conservative AGL ignition gate for a relightable coast."""
