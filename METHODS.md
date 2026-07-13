@@ -295,7 +295,47 @@ The target altitude and vertical-velocity reference descend at:
 - 0.6 m/s from 1 to 2.5 m;
 - 0.25 m/s below 1 m.
 
-The high-altitude bands create a visibly forceful approach, while the final bands reserve enough altitude for powered braking. Engine cutoff occurs near the landed body/leg reference height with less than 0.30 m horizontal error, less than 0.20 m/s horizontal speed, and a bounded descent rate. MuJoCo then resolves the deliberately small residual motion through landing-leg contact and pad friction rather than holding the engine on for repeated terminal corrections.
+The high-altitude bands create a visibly forceful approach, while the final bands reserve enough altitude for powered braking. The altitude reference is integrated continuously, and the velocity reference switches directly from one band speed to the next. No zero-speed waypoint is inserted at a band boundary, and the target altitude is not reset against the measured vehicle altitude.
+
+Engine cutoff occurs within 0.15 m of the landed body/leg reference height when horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, and vertical speed is between -0.50 and +0.15 m/s. MuJoCo then resolves the deliberately small residual motion through landing-leg contact and pad friction rather than holding the engine on for repeated terminal corrections.
+
+### Fuel-reserve takeover
+
+Outside auto-land, the simulator periodically estimates landing propellant from a transparent impulse approximation. For height $h$, the nominal profile time is
+
+\[
+t_d(h)=\int_0^h \frac{d\eta}{v_d(\eta)},
+\]
+
+where $v_d(h)$ is the nonzero piecewise descent speed above. The alignment-time estimate is
+
+\[
+t_a=\min\left(8,\max\left(\frac{\lVert r_{xy}\rVert}{3},
+\frac{\lVert v_{xy}\rVert}{1.5}\right)\right).
+\]
+
+With current wet mass $m$, gravity magnitude $g$, horizontal speed $v_{xy}$, and excess downward speed $v_e=\max(-v_z-v_d(h),0)$, estimated fuel is
+
+\[
+m_{f,\mathrm{land}}=\alpha\left[m g(t_a+t_d)
++m(\lVert v_{xy}\rVert+v_e)\right]+100\ \mathrm{kg}.
+\]
+
+When the engine is lit, the rocket is above the end-burn cutoff height, and remaining fuel satisfies
+
+\[
+m_f\leq 1.05\,m_{f,\mathrm{land}},
+\]
+
+auto-land takes over and the trigger latches for the flight. Reserve takeover uses the current altitude as its alignment altitude, avoiding an unnecessary climb to the normal staging height. This is a conservative heuristic guard, not an MPC-derived certified propellant-to-go bound.
+
+### Controller ownership indicator
+
+The GUI displays the controller that currently owns the actuators:
+
+- `MPC ACTIVE` after a valid SCvx result is accepted;
+- `FALLBACK ACTIVE` while automatic control is using the deterministic backup, including MPC warm-up or solver failure;
+- `MANUAL TVC` when hover and auto-land are inactive.
 
 The phase logic is intentionally separate from the optimizer. It provides interpretable reference generation while the MPC handles coupled six-degree-of-freedom tracking and actuator constraints.
 

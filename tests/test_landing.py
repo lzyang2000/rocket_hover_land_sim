@@ -4,6 +4,8 @@ import pytest
 
 from rocket_landing.controller import EngineState
 from rocket_landing.sim import (
+  AUTO_LAND_FUEL_CHECK_PERIOD_S,
+  AUTO_LAND_FUEL_MARGIN,
   LandingPhase,
   ROCKET_LANDED_COM_Z_M,
   RocketSimulation,
@@ -81,6 +83,27 @@ def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> No
     np.array([0.0, 0.0, -5.0])
   )
 
+  transition = RocketSimulation()
+  transition.controller.ignite()
+  transition.hover_enabled = True
+  transition.landing_phase = LandingPhase.DESCEND
+  transition.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 31.0
+  mujoco.mj_forward(transition.model, transition.data)
+  transition.hover_target_position = (
+    transition.center_of_mass_position_world().copy()
+  )
+  transition_rates = []
+  for height in (31.0, 29.99, 17.99, 9.99, 4.99, 2.49, 0.99):
+    transition.data.qpos[2] = ROCKET_LANDED_COM_Z_M + height
+    mujoco.mj_forward(transition.model, transition.data)
+    transition._update_landing_guidance()
+    transition_rates.append(-float(transition.hover_target_velocity[2]))
+
+  assert transition_rates == pytest.approx(
+    [12.0, 8.0, 5.0, 3.0, 1.5, 0.6, 0.25]
+  )
+  assert min(transition_rates) > 0.0
+
   flight = RocketSimulation()
   flight.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 40.0
   flight.data.qvel[:] = 0.0
@@ -101,7 +124,55 @@ def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> No
   assert flight.landing_phase is LandingPhase.COMPLETE
   assert peak_descent_speed > 10.0
   assert cutoff_height > 0.05
-  assert -0.35 <= float(flight.data.qvel[2]) <= 0.10
+  assert cutoff_height < 0.151
+  assert -0.50 <= float(flight.data.qvel[2]) <= 0.15
+
+
+def test_fuel_reserve_takeover_triggers_at_105_percent_and_latches() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 40.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+  estimated_fuel_kg = 2_000.0
+  simulation.estimated_landing_fuel_kg = lambda: estimated_fuel_kg
+
+  simulation.controller.fuel_mass_kg = (
+    AUTO_LAND_FUEL_MARGIN * estimated_fuel_kg + 0.01
+  )
+  simulation._check_fuel_reserve_takeover()
+  assert simulation.landing_phase is LandingPhase.INACTIVE
+
+  simulation.data.time += AUTO_LAND_FUEL_CHECK_PERIOD_S
+  simulation.controller.fuel_mass_kg = AUTO_LAND_FUEL_MARGIN * estimated_fuel_kg
+  takeover_altitude = float(simulation.center_of_mass_position_world()[2])
+  simulation._check_fuel_reserve_takeover()
+
+  assert simulation.landing_phase is LandingPhase.ALIGN
+  assert simulation.fuel_takeover_active
+  assert simulation.fuel_takeover_triggered
+  assert simulation.landing_staging_altitude == pytest.approx(takeover_altitude)
+
+  simulation.cancel_landing()
+  simulation.data.time += AUTO_LAND_FUEL_CHECK_PERIOD_S
+  simulation._check_fuel_reserve_takeover()
+  assert simulation.landing_phase is LandingPhase.INACTIVE
+  assert not simulation.fuel_takeover_active
+
+
+def test_full_fuel_does_not_trigger_reserve_takeover() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 40.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.controller.ignite()
+
+  assert (
+    simulation.fuel_takeover_threshold_kg()
+    < simulation.controller.fuel_mass_kg
+  )
+  simulation._check_fuel_reserve_takeover()
+
+  assert simulation.landing_phase is LandingPhase.INACTIVE
+  assert not simulation.fuel_takeover_triggered
 
 
 def test_align_phase_accepts_a_coarser_pad_capture() -> None:
@@ -177,7 +248,7 @@ def test_scvx_mpc_flies_terminal_descent_and_cuts_off() -> None:
     simulation.center_of_mass_velocity_world()[0:2]
   ) < 0.21
 
-  for _ in range(1_000):
+  for _ in range(2_000):
     simulation.step()
 
   assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.50

@@ -22,7 +22,10 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 - Live 3-D engine arrow whose direction follows gimbal and whose length follows thrust magnitude.
 - Three-dimensional hover/position hold.
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
+- Automatic landing takeover at 1.05 times the estimated landing-fuel reserve.
 - Deterministic 6-DOF fallback control if an MPC solve fails.
+- A controller-owner badge that reports `MPC ACTIVE`, `FALLBACK ACTIVE`, or
+  `MANUAL TVC`.
 
 ## Requirements
 
@@ -71,7 +74,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.2`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.3`.
 
 ## Controls
 
@@ -133,7 +136,7 @@ In hover mode:
 - Up/Down moves the altitude target at 2 m/s;
 - releasing the controls leaves the target fixed and the controller settles there.
 
-Telemetry reports `SCVX MPC: OPTIMAL` and the latest solve time when the optimizer owns the vehicle. `6-DOF FALLBACK` means the deterministic backup controller is active.
+Telemetry reports `SCVX MPC: OPTIMAL` and the latest solve time when the optimizer owns the vehicle. `6-DOF FALLBACK` means the deterministic backup controller is active. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, orange `FALLBACK ACTIVE`, or gray `MANUAL TVC`.
 
 ### Automatic landing
 
@@ -149,9 +152,13 @@ The state machine supplies moving position and velocity references to the same 6
 - 0.6 m/s from 1 to 2.5 m;
 - 0.25 m/s inside the final meter.
 
+Crossing a band boundary changes the reference directly to the next nonzero descent speed; guidance does not insert a zero-velocity hold between bands. The altitude reference remains a continuously integrated trajectory, so residual lateral alignment does not reset or jump the vertical target.
+
+While the engine is lit outside auto-land, the simulator estimates the propellant needed to align, descend through this profile, and brake excess velocity. If fuel remaining falls to `1.05 ×` that estimate while the rocket is above the end-burn cutoff height, auto-land takes over once and latches. A reserve takeover aligns at the current altitude rather than climbing to the normal staging height. The estimate is deliberately conservative and heuristic—not a certified propellant-to-go result from the MPC—and includes a fixed 100 kg terminal reserve.
+
 To prevent low-altitude hunting, the physical gimbal follows commands through an actuator lag and is limited to 3° below 5 m, 1.5° below 2.5 m, and 0.75° in the final meter. Very small terminal commands enter a 0.15° deadband.
 
-The engine cuts directly to zero once horizontal error is below 0.30 m, horizontal speed is below 0.20 m/s, vertical speed is inside the touchdown window, and the rocket is within 10 cm of its landing body height. The legs and pad friction then settle the small residual motion instead of the engine hovering close to the ground and repeatedly correcting it.
+The engine cuts directly to zero once horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, vertical speed is between -0.50 and +0.15 m/s, and the rocket is within 15 cm of its landing body height. These wider end-burn tolerances avoid low-altitude hunting; the legs and pad friction then settle the residual motion instead of the engine hovering close to the ground and repeatedly correcting it.
 
 ## Falcon 9-like dimensions and dynamics
 

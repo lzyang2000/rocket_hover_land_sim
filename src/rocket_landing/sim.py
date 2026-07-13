@@ -45,6 +45,10 @@ ROLL_RCS_TIME_CONSTANT_S = 0.10
 GIMBAL_TIME_CONSTANT_S = 0.08
 TERMINAL_GIMBAL_TIME_CONSTANT_S = 0.20
 TERMINAL_GIMBAL_DEADBAND_RADIANS = math.radians(0.15)
+AUTO_LAND_FUEL_MARGIN = 1.05
+AUTO_LAND_FUEL_CHECK_PERIOD_S = 0.25
+AUTO_LAND_TAKEOVER_MIN_HEIGHT_M = 0.15
+AUTO_LAND_FIXED_FUEL_RESERVE_KG = 100.0
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
@@ -62,7 +66,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.2 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.3 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -162,6 +166,10 @@ class RocketSimulation:
     self.hover_target_velocity = np.zeros(3, dtype=float)
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.fuel_takeover_triggered = False
+    self.fuel_takeover_active = False
+    self.last_fuel_takeover_check_time = -math.inf
+    self.last_estimated_landing_fuel_kg = 0.0
     self.reset()
 
   def reset(self) -> None:
@@ -173,6 +181,10 @@ class RocketSimulation:
     self.hover_target_velocity[:] = 0.0
     self.landing_phase = LandingPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
+    self.fuel_takeover_triggered = False
+    self.fuel_takeover_active = False
+    self.last_fuel_takeover_check_time = -math.inf
+    self.last_estimated_landing_fuel_kg = 0.0
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
     self.engine_gimbal_command_radians[:] = 0.0
@@ -293,7 +305,7 @@ class RocketSimulation:
     target[2] += self.current_mass_properties().center_of_mass_body_m[2]
     return target
 
-  def start_landing(self) -> bool:
+  def start_landing(self, *, fuel_takeover: bool = False) -> bool:
     if self.controller.engine_state is EngineState.OFF:
       self.controller.ignite()
     if self.controller.engine_state is not EngineState.LIT:
@@ -303,8 +315,10 @@ class RocketSimulation:
 
     current_altitude = float(self.center_of_mass_position_world()[2])
     landed_com_altitude = float(self.landing_center_of_mass_position()[2])
-    self.landing_staging_altitude = max(
-      current_altitude, landed_com_altitude + 12.0
+    self.landing_staging_altitude = (
+      current_altitude
+      if fuel_takeover
+      else max(current_altitude, landed_com_altitude + 12.0)
     )
     self.hover_target_position = np.array(
       [0.0, 0.0, self.landing_staging_altitude], dtype=float
@@ -312,6 +326,9 @@ class RocketSimulation:
     self.hover_target_velocity[:] = 0.0
     self.hover_enabled = True
     self.landing_phase = LandingPhase.ALIGN
+    self.fuel_takeover_active = fuel_takeover
+    if fuel_takeover:
+      self.fuel_takeover_triggered = True
     self._update_hover_controller(force=True)
     return True
 
@@ -319,12 +336,16 @@ class RocketSimulation:
     if self.landing_active:
       self._invalidate_mpc_solution()
       self.landing_phase = LandingPhase.INACTIVE
+      self.fuel_takeover_active = False
       self.hover_target_position = self.center_of_mass_position_world()
       self.hover_target_velocity[:] = 0.0
       self.hover_enabled = True
 
-  def _descent_rate_mps(self) -> float:
-    height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+  @staticmethod
+  def descent_rate_for_height_mps(height_m: float) -> float:
+    """Return the nonzero speed assigned to the current altitude band."""
+
+    height = max(float(height_m), 0.0)
     if height > 30.0:
       return 12.0
     if height > 18.0:
@@ -338,6 +359,80 @@ class RocketSimulation:
     if height > 1.0:
       return 0.6
     return 0.25
+
+  def _descent_rate_mps(self) -> float:
+    height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+    return self.descent_rate_for_height_mps(height)
+
+  @classmethod
+  def estimated_descent_time_seconds(cls, height_m: float) -> float:
+    """Numerically integrate dh/v(h) through the nonzero speed bands."""
+
+    height = max(float(height_m), 0.0)
+    if height <= 0.0:
+      return 0.0
+    sample_count = max(32, int(math.ceil(height * 2.0)) + 1)
+    samples = np.linspace(0.0, height, sample_count)
+    inverse_rates = np.array(
+      [1.0 / cls.descent_rate_for_height_mps(value) for value in samples]
+    )
+    intervals = np.diff(samples)
+    return float(
+      np.sum(0.5 * intervals * (inverse_rates[:-1] + inverse_rates[1:]))
+    )
+
+  def estimated_landing_fuel_kg(self) -> float:
+    """Estimate remaining propellant required to align, descend, and brake."""
+
+    height = max(
+      float(self.data.qpos[2] - LANDING_PAD_POSITION[2]), 0.0
+    )
+    position = self.center_of_mass_position_world()
+    velocity = self.center_of_mass_velocity_world()
+    horizontal_error = float(np.linalg.norm(position[0:2]))
+    horizontal_speed = float(np.linalg.norm(velocity[0:2]))
+    align_time = min(
+      8.0,
+      max(horizontal_error / 3.0, horizontal_speed / 1.5),
+    )
+    descent_time = self.estimated_descent_time_seconds(height)
+    desired_descent_speed = self.descent_rate_for_height_mps(height)
+    excess_descent_speed = max(-float(velocity[2]) - desired_descent_speed, 0.0)
+    mass = self.controller.wet_mass_kg
+    gravity = abs(float(self.model.opt.gravity[2]))
+    estimated_impulse = (
+      mass * gravity * (align_time + descent_time)
+      + mass * (horizontal_speed + excess_descent_speed)
+    )
+    return float(
+      self.controller.limits.alpha_kg_per_newton_second * estimated_impulse
+      + AUTO_LAND_FIXED_FUEL_RESERVE_KG
+    )
+
+  def fuel_takeover_threshold_kg(self) -> float:
+    return AUTO_LAND_FUEL_MARGIN * self.estimated_landing_fuel_kg()
+
+  def _check_fuel_reserve_takeover(self) -> None:
+    if (
+      self.data.time - self.last_fuel_takeover_check_time
+      < AUTO_LAND_FUEL_CHECK_PERIOD_S
+    ):
+      return
+    self.last_fuel_takeover_check_time = float(self.data.time)
+    estimate = self.estimated_landing_fuel_kg()
+    self.last_estimated_landing_fuel_kg = estimate
+    if (
+      self.fuel_takeover_triggered
+      or self.landing_active
+      or self.landing_phase in (LandingPhase.COMPLETE, LandingPhase.ABORTED)
+      or self.controller.engine_state is not EngineState.LIT
+    ):
+      return
+    height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+    if height <= AUTO_LAND_TAKEOVER_MIN_HEIGHT_M:
+      return
+    if self.controller.fuel_mass_kg <= AUTO_LAND_FUEL_MARGIN * estimate:
+      self.start_landing(fuel_takeover=True)
 
   def _update_landing_guidance(self) -> None:
     if not self.landing_active:
@@ -389,10 +484,10 @@ class RocketSimulation:
       )
       height = float(body_position[2] - LANDING_PAD_POSITION[2])
       ready_for_cutoff = (
-        height < 0.10
-        and -0.35 <= body_velocity[2] <= 0.10
-        and horizontal_error < 0.30
-        and horizontal_speed < 0.20
+        height < 0.15
+        and -0.50 <= body_velocity[2] <= 0.15
+        and horizontal_error < 0.50
+        and horizontal_speed < 0.30
       )
       if ready_for_cutoff:
         self._invalidate_mpc_solution()
@@ -890,6 +985,7 @@ class RocketSimulation:
     self.model.geom_rgba[self.flame_geom_id, 3] = 0.58 if lit else 0.0
 
   def step(self) -> None:
+    self._check_fuel_reserve_takeover()
     self._update_landing_guidance()
     if self.hover_enabled:
       self._update_hover_controller()
@@ -908,10 +1004,15 @@ class RocketSimulation:
     position = self.data.qpos[0:3]
     velocity = self.data.qvel[0:3]
     if self.landing_phase is LandingPhase.ALIGN:
-      mode_line = "MODE AUTO LAND: ALIGN OVER PAD"
-    elif self.landing_phase is LandingPhase.DESCEND:
       mode_line = (
-        "MODE AUTO LAND: DESCEND    "
+        "MODE AUTO LAND: FUEL RESERVE ALIGN"
+        if self.fuel_takeover_active
+        else "MODE AUTO LAND: ALIGN OVER PAD"
+      )
+    elif self.landing_phase is LandingPhase.DESCEND:
+      descent_source = "FUEL RESERVE " if self.fuel_takeover_active else ""
+      mode_line = (
+        f"MODE AUTO LAND: {descent_source}DESCEND    "
         f"TARGET Z {self.hover_target_position[2]:.1f} m    "
         f"TARGET VZ {self.hover_target_velocity[2]:.2f} m/s"
       )
@@ -962,7 +1063,8 @@ class RocketSimulation:
       ),
       (
         f"{mode_line}    {control_line}    "
-        f"RCS {self.roll_control_torque_nm / 1000:+5.1f} kN m"
+        f"RCS {self.roll_control_torque_nm / 1000:+5.1f} kN m    "
+        f"LAND EST {self.last_estimated_landing_fuel_kg:.0f} kg"
       ),
       "3-D arrow: plume direction, vehicle thrust is opposite",
       "H hover | L auto-land | arrows altitude/throttle | WASD target/thrust | K kill | R reset",
@@ -1054,6 +1156,27 @@ class RocketWindow:
     window_width: int,
   ) -> tuple[float, float, float, float]:
     return (window_width - 210.0, 354.0, 188.0, 20.0)
+
+  @staticmethod
+  def _controller_indicator_rect_window(
+    window_width: int,
+  ) -> tuple[float, float, float, float]:
+    return (window_width - 210.0, 404.0, 188.0, 42.0)
+
+  def _controller_indicator_style(
+    self,
+  ) -> tuple[str, tuple[float, float, float, float]]:
+    simulation = self.simulation
+    if simulation.hover_enabled:
+      if (
+        simulation.enable_mpc
+        and not simulation.mpc_using_fallback
+        and simulation.last_mpc_result is not None
+        and simulation.last_mpc_result.success
+      ):
+        return "MPC ACTIVE", (0.02, 0.55, 0.38, 0.96)
+      return "FALLBACK ACTIVE", (0.82, 0.38, 0.02, 0.96)
+    return "MANUAL TVC", (0.18, 0.24, 0.31, 0.94)
 
   @classmethod
   def _point_in_engine_button(
@@ -1440,10 +1563,18 @@ class RocketWindow:
     )
     if self.simulation.landing_phase is LandingPhase.ALIGN:
       land_color = (0.78, 0.38, 0.02, 0.96)
-      land_label = "LAND: ALIGN"
+      land_label = (
+        "FUEL AUTO: ALIGN"
+        if self.simulation.fuel_takeover_active
+        else "LAND: ALIGN"
+      )
     elif self.simulation.landing_phase is LandingPhase.DESCEND:
       land_color = (0.78, 0.38, 0.02, 0.96)
-      land_label = "LAND: DESCEND"
+      land_label = (
+        "FUEL AUTO: LAND"
+        if self.simulation.fuel_takeover_active
+        else "LAND: DESCEND"
+      )
     elif self.simulation.landing_phase is LandingPhase.COMPLETE:
       land_color = (0.08, 0.48, 0.18, 0.94)
       land_label = "LANDED"
@@ -1572,6 +1703,26 @@ class RocketWindow:
       mujoco.mjtGridPos.mjGRID_TOPLEFT,
       slider_label_rect,
       f"THRUST {self.simulation.controller.throttle * 100:.1f}%  {slider_owner}",
+      "",
+      self.context,
+    )
+
+    indicator_x, indicator_y, indicator_width, indicator_height = (
+      self._controller_indicator_rect_window(window_width)
+    )
+    indicator_rect = mujoco.MjrRect(
+      int(indicator_x * scale_x),
+      int((window_height - indicator_y - indicator_height) * scale_y),
+      int(indicator_width * scale_x),
+      int(indicator_height * scale_y),
+    )
+    indicator_label, indicator_color = self._controller_indicator_style()
+    mujoco.mjr_rectangle(indicator_rect, *indicator_color)
+    mujoco.mjr_overlay(
+      mujoco.mjtFont.mjFONT_BIG,
+      mujoco.mjtGridPos.mjGRID_TOPLEFT,
+      indicator_rect,
+      indicator_label,
       "",
       self.context,
     )

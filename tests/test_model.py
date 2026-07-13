@@ -351,6 +351,33 @@ def test_direction_indicator_levels_match_gimbal_command() -> None:
   assert levels == {"W": 0.0, "A": 0.0, "S": 0.7, "D": 0.4}
 
 
+def test_controller_indicator_reports_manual_fallback_and_mpc_ownership() -> None:
+  window = RocketWindow.__new__(RocketWindow)
+  window.simulation = RocketSimulation()
+
+  label, _ = window._controller_indicator_style()
+  assert label == "MANUAL TVC"
+
+  window.simulation.hover_enabled = True
+  label, _ = window._controller_indicator_style()
+  assert label == "FALLBACK ACTIVE"
+
+  window.simulation.enable_mpc = True
+  window.simulation.mpc_using_fallback = False
+  window.simulation.last_mpc_result = MPCResult(
+    success=True,
+    control=np.zeros(4),
+    predicted_states=np.empty((14, 0)),
+    status="optimal",
+    solve_time_seconds=0.01,
+    iterations=1,
+    scaled_dynamics_defect=0.0,
+    scaled_virtual_control=0.0,
+  )
+  label, _ = window._controller_indicator_style()
+  assert label == "MPC ACTIVE"
+
+
 def test_short_key_events_trigger_mode_commands() -> None:
   window = RocketWindow.__new__(RocketWindow)
   window.simulation = RocketSimulation()
