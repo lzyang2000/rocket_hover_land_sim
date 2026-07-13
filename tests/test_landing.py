@@ -81,6 +81,49 @@ def test_auto_land_aligns_descends_and_cuts_off_on_the_pad() -> None:
   assert simulation.controller.fuel_mass_kg > 0.0
 
 
+def test_auto_land_after_manual_takeoff_captures_the_braking_apex() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.ignite()
+  simulation.controller.throttle = 0.80
+
+  for _ in range(round(3.0 / simulation.model.opt.timestep)):
+    simulation.step()
+
+  click_altitude = float(simulation.center_of_mass_position_world()[2])
+  click_vertical_speed = float(simulation.center_of_mass_velocity_world()[2])
+  assert click_altitude - ROCKET_LANDED_COM_Z_M > 25.0
+  assert click_vertical_speed > 20.0
+
+  assert simulation.start_landing()
+  braking_acceleration = (
+    abs(float(simulation.model.opt.gravity[2]))
+    - simulation.controller.limits.min_thrust_newtons
+    / simulation.controller.wet_mass_kg
+  )
+  expected_staging_altitude = click_altitude + (
+    click_vertical_speed * click_vertical_speed
+    / (2.0 * braking_acceleration)
+  )
+  assert simulation.landing_staging_altitude == pytest.approx(
+    expected_staging_altitude
+  )
+
+  align_duration = None
+  for step in range(8_000):
+    simulation.step()
+    if (
+      align_duration is None
+      and simulation.landing_phase is LandingPhase.DESCEND
+    ):
+      align_duration = step * simulation.model.opt.timestep
+    if simulation.landing_phase is LandingPhase.COMPLETE:
+      break
+
+  assert align_duration is not None
+  assert align_duration < 10.0
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+
+
 def test_landing_legs_stay_stowed_until_terminal_descent_then_latch() -> None:
   simulation = RocketSimulation()
   foot_id = simulation.landing_foot_geom_ids["xp"]

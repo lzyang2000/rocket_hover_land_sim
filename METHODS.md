@@ -298,7 +298,19 @@ Auto-land supplies references through two phases:
 
 ### Align
 
-Normal auto-land establishes a staging altitude at least 25 m above the pad. If auto-land is selected below that height, the vehicle climbs to staging before descent; if selected higher, it holds the current altitude. Rather than jumping the lateral reference directly to the pad, guidance uses a 4 m horizontal lead through 18 m altitude, expands it by 0.15 m per additional metre, and caps it at 8 m. The vertical lead remains 2 m. Fuel-reserve takeover is the exception: it holds the current altitude because an emergency fuel trigger should not spend propellant climbing.
+Normal auto-land establishes a staging altitude at least 25 m above the pad. If auto-land is selected below that height, the vehicle climbs to staging before descent; if selected higher without significant upward velocity, it holds the current altitude. A manual high-thrust takeoff can have substantial upward momentum when LAND is clicked. Freezing staging at the click altitude would make the rocket overshoot and then spend a long time returning to an obsolete target. Guidance therefore estimates the strongest downward acceleration available while the lit engine remains at its nonzero minimum thrust,
+
+\[
+a_b=g-\frac{T_{\min}}{m},
+\]
+
+and raises staging to at least the corresponding upward stopping altitude,
+
+\[
+h_b=h+\frac{\max(v_z,0)^2}{2a_b}.
+\]
+
+This does not command an avoidable climb: it captures the braking apex that the current upward trajectory must reach. Rather than jumping the lateral reference directly to the pad, guidance uses a 4 m horizontal lead through 18 m altitude, expands it by 0.15 m per additional metre, and caps it at 8 m. The vertical lead remains 2 m. Fuel-reserve takeover normally holds the current altitude because an emergency fuel trigger should not spend propellant climbing, but it uses the same braking-apex floor when the vehicle is already rising.
 
 DESCEND cannot begin until alignment is completed at staging. The capture gate requires lateral error below 2 m, horizontal speed below 1.0 m/s, staging-altitude error below 2 m, and vertical speed below 1.5 m/s. There is no timeout and no descent-time feasibility bypass. Horizontal correction remains active after the transition, but the large capture maneuver is completed high, before the aggressive descent and 7 m terminal handoff.
 

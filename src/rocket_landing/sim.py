@@ -111,7 +111,7 @@ WINDOW_HEIGHT = 820
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.17 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.18 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -582,6 +582,42 @@ class RocketSimulation:
     target[2] += self.current_mass_properties().center_of_mass_body_m[2]
     return target
 
+  def _landing_staging_altitude_for_current_state(
+    self, *, fuel_takeover: bool
+  ) -> float:
+    """Choose a staging altitude reachable through the current climb."""
+
+    position = self.center_of_mass_position_world()
+    velocity = self.center_of_mass_velocity_world()
+    current_altitude = float(position[2])
+    landed_com_altitude = float(self.landing_center_of_mass_position()[2])
+    staging_altitude = (
+      current_altitude
+      if fuel_takeover
+      else max(
+        current_altitude,
+        landed_com_altitude + LANDING_STAGING_HEIGHT_M,
+      )
+    )
+
+    upward_speed = max(float(velocity[2]), 0.0)
+    if upward_speed <= 0.0:
+      return staging_altitude
+
+    gravity = abs(float(self.model.opt.gravity[2]))
+    minimum_thrust_acceleration = (
+      self.controller.limits.min_thrust_newtons
+      / self.controller.wet_mass_kg
+    )
+    maximum_downward_acceleration = gravity - minimum_thrust_acceleration
+    if maximum_downward_acceleration <= 1e-6:
+      return staging_altitude
+
+    stopping_distance = upward_speed * upward_speed / (
+      2.0 * maximum_downward_acceleration
+    )
+    return max(staging_altitude, current_altitude + stopping_distance)
+
   def start_landing(self, *, fuel_takeover: bool = False) -> bool:
     if self.controller.engine_state is EngineState.OFF:
       self.controller.ignite()
@@ -591,14 +627,9 @@ class RocketSimulation:
     self._invalidate_mpc_solution()
     self._set_launch_mount_enabled(False)
 
-    current_altitude = float(self.center_of_mass_position_world()[2])
-    landed_com_altitude = float(self.landing_center_of_mass_position()[2])
     self.landing_staging_altitude = (
-      current_altitude
-      if fuel_takeover
-      else max(
-        current_altitude,
-        landed_com_altitude + LANDING_STAGING_HEIGHT_M,
+      self._landing_staging_altitude_for_current_state(
+        fuel_takeover=fuel_takeover
       )
     )
     self.hover_target_position = self.center_of_mass_position_world()
