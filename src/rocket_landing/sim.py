@@ -108,10 +108,14 @@ FLAME_ORIGIN_BODY_Z_M = -20.10
 ENGINE_POSITION_BODY = np.array([0.0, 0.0, FLAME_ORIGIN_BODY_Z_M])
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 820
+GUI_PANEL_MIN_WIDTH = 188.0
+GUI_PANEL_MAX_WIDTH = 260.0
+GUI_PANEL_WIDTH_FRACTION = 0.20
+GUI_PANEL_MARGIN = 22.0
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.18 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.19 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -1779,14 +1783,115 @@ class RocketSimulation:
 class RocketWindow:
   """Small GLFW-based MuJoCo viewer with a clickable engine-kill button."""
 
+  @staticmethod
+  def _fit_window_size_to_work_area(
+    work_width: int, work_height: int
+  ) -> tuple[int, int]:
+    """Keep the initial window inside the monitor's usable desktop area."""
+
+    available_width = max(int(work_width), 1)
+    available_height = max(int(work_height), 1)
+    width = min(
+      WINDOW_WIDTH,
+      available_width,
+      max(640, int(0.92 * available_width)),
+    )
+    height = min(
+      WINDOW_HEIGHT,
+      available_height,
+      max(520, int(0.90 * available_height)),
+    )
+    return width, height
+
+  @classmethod
+  def _initial_window_size(cls) -> tuple[int, int]:
+    monitor = glfw.get_primary_monitor()
+    if monitor is None:
+      return WINDOW_WIDTH, WINDOW_HEIGHT
+    _, _, work_width, work_height = glfw.get_monitor_workarea(monitor)
+    return cls._fit_window_size_to_work_area(work_width, work_height)
+
+  @staticmethod
+  def _font_scale_for_display(
+    window_width: int,
+    window_height: int,
+    framebuffer_width: int,
+    framebuffer_height: int,
+  ) -> int:
+    """Choose MuJoCo glyph resolution matching logical-to-pixel scale."""
+
+    scale_x = (
+      framebuffer_width / window_width if window_width > 0 else 1.0
+    )
+    scale_y = (
+      framebuffer_height / window_height if window_height > 0 else 1.0
+    )
+    display_scale = max(
+      scale_x,
+      scale_y,
+      0.5,
+    )
+    requested_scale = 100.0 * display_scale
+    available_scales = (50, 100, 150, 200, 250, 300)
+    eligible = [
+      scale for scale in available_scales if scale <= requested_scale + 1e-6
+    ]
+    return eligible[-1] if eligible else available_scales[0]
+
+  @staticmethod
+  def _text_width_pixels(text: str, character_widths) -> int:
+    widths = character_widths
+    if len(widths) == 0:
+      return 0
+    fallback_index = min(ord("?"), len(widths) - 1)
+    fallback_width = int(widths[fallback_index])
+    return sum(
+      int(widths[code]) if code < len(widths) else fallback_width
+      for code in (ord(character) for character in text)
+    )
+
+  @classmethod
+  def _wrap_overlay_lines(
+    cls,
+    lines: tuple[str, ...] | list[str],
+    maximum_width_pixels: int,
+    character_widths,
+  ) -> tuple[str, ...]:
+    """Word-wrap overlay text using MuJoCo's actual rasterized glyph widths."""
+
+    wrapped: list[str] = []
+    maximum_width = max(int(maximum_width_pixels), 1)
+    for line in lines:
+      if cls._text_width_pixels(line, character_widths) <= maximum_width:
+        wrapped.append(line)
+        continue
+      words = line.split()
+      if not words:
+        wrapped.append("")
+        continue
+      current = words[0]
+      for word in words[1:]:
+        candidate = f"{current} {word}"
+        if (
+          cls._text_width_pixels(candidate, character_widths)
+          <= maximum_width
+        ):
+          current = candidate
+        else:
+          wrapped.append(current)
+          current = word
+      wrapped.append(current)
+    return tuple(wrapped)
+
   def __init__(self, simulation: RocketSimulation) -> None:
     self.simulation = simulation
     if not glfw.init():
       raise RuntimeError("GLFW could not initialize a graphics context.")
 
     glfw.window_hint(glfw.SAMPLES, 4)
+    window_width, window_height = self._initial_window_size()
     self.window = glfw.create_window(
-      WINDOW_WIDTH, WINDOW_HEIGHT, APP_TITLE, None, None
+      window_width, window_height, APP_TITLE, None, None
     )
     if self.window is None:
       glfw.terminate()
@@ -1798,8 +1903,18 @@ class RocketWindow:
     self.camera = mujoco.MjvCamera()
     self.option = mujoco.MjvOption()
     self.scene = mujoco.MjvScene(self.simulation.model, maxgeom=10_000)
+    window_width, window_height = glfw.get_window_size(self.window)
+    framebuffer_width, framebuffer_height = glfw.get_framebuffer_size(
+      self.window
+    )
+    self.font_scale = self._font_scale_for_display(
+      window_width,
+      window_height,
+      framebuffer_width,
+      framebuffer_height,
+    )
     self.context = mujoco.MjrContext(
-      self.simulation.model, mujoco.mjtFontScale.mjFONTSCALE_150.value
+      self.simulation.model, self.font_scale
     )
     mujoco.mjv_defaultCamera(self.camera)
     mujoco.mjv_defaultOption(self.option)
@@ -1833,40 +1948,71 @@ class RocketWindow:
     glfw.set_scroll_callback(self.window, self._on_scroll)
 
   @staticmethod
-  def _engine_button_rect_window(window_width: int) -> tuple[float, float, float, float]:
-    return (window_width - 210.0, 22.0, 188.0, 52.0)
-
-  @staticmethod
-  def _hover_button_rect_window(window_width: int) -> tuple[float, float, float, float]:
-    return (window_width - 210.0, 84.0, 188.0, 46.0)
-
-  @staticmethod
-  def _land_button_rect_window(window_width: int) -> tuple[float, float, float, float]:
-    return (window_width - 210.0, 140.0, 188.0, 46.0)
-
-  @staticmethod
-  def _direction_button_rects_window(
+  def _control_panel_rect_window(
     window_width: int,
+  ) -> tuple[float, float]:
+    panel_width = float(
+      np.clip(
+        GUI_PANEL_WIDTH_FRACTION * window_width,
+        GUI_PANEL_MIN_WIDTH,
+        GUI_PANEL_MAX_WIDTH,
+      )
+    )
+    panel_width = min(panel_width, max(float(window_width) - 24.0, 1.0))
+    margin = min(GUI_PANEL_MARGIN, max((window_width - panel_width) / 2.0, 0.0))
+    return float(window_width) - margin - panel_width, panel_width
+
+  @classmethod
+  def _engine_button_rect_window(
+    cls, window_width: int
+  ) -> tuple[float, float, float, float]:
+    panel_x, panel_width = cls._control_panel_rect_window(window_width)
+    return (panel_x, 22.0, panel_width, 52.0)
+
+  @classmethod
+  def _hover_button_rect_window(
+    cls, window_width: int
+  ) -> tuple[float, float, float, float]:
+    panel_x, panel_width = cls._control_panel_rect_window(window_width)
+    return (panel_x, 84.0, panel_width, 46.0)
+
+  @classmethod
+  def _land_button_rect_window(
+    cls, window_width: int
+  ) -> tuple[float, float, float, float]:
+    panel_x, panel_width = cls._control_panel_rect_window(window_width)
+    return (panel_x, 140.0, panel_width, 46.0)
+
+  @classmethod
+  def _direction_button_rects_window(
+    cls, window_width: int,
   ) -> dict[str, tuple[float, float, float, float]]:
-    panel_x = window_width - 210.0
+    panel_x, panel_width = cls._control_panel_rect_window(window_width)
+    button_width = min(52.0, max((panel_width - 16.0) / 3.0, 1.0))
+    gap = 8.0
+    row_width = 3.0 * button_width + 2.0 * gap
+    row_x = panel_x + 0.5 * (panel_width - row_width)
+    center_x = panel_x + 0.5 * (panel_width - button_width)
     return {
-      "W": (panel_x + 68.0, 214.0, 52.0, 42.0),
-      "A": (panel_x + 8.0, 264.0, 52.0, 42.0),
-      "S": (panel_x + 68.0, 264.0, 52.0, 42.0),
-      "D": (panel_x + 128.0, 264.0, 52.0, 42.0),
+      "W": (center_x, 214.0, button_width, 42.0),
+      "A": (row_x, 264.0, button_width, 42.0),
+      "S": (row_x + button_width + gap, 264.0, button_width, 42.0),
+      "D": (row_x + 2.0 * (button_width + gap), 264.0, button_width, 42.0),
     }
 
-  @staticmethod
+  @classmethod
   def _thrust_slider_rect_window(
-    window_width: int,
+    cls, window_width: int,
   ) -> tuple[float, float, float, float]:
-    return (window_width - 210.0, 354.0, 188.0, 20.0)
+    panel_x, panel_width = cls._control_panel_rect_window(window_width)
+    return (panel_x, 354.0, panel_width, 20.0)
 
-  @staticmethod
+  @classmethod
   def _controller_indicator_rect_window(
-    window_width: int,
+    cls, window_width: int,
   ) -> tuple[float, float, float, float]:
-    return (window_width - 210.0, 404.0, 188.0, 42.0)
+    panel_x, panel_width = cls._control_panel_rect_window(window_width)
+    return (panel_x, 404.0, panel_width, 42.0)
 
   def _controller_indicator_style(
     self,
@@ -1884,6 +2030,17 @@ class RocketWindow:
         return "MPC ACTIVE", (0.02, 0.55, 0.38, 0.96)
       return "FALLBACK ACTIVE", (0.82, 0.38, 0.02, 0.96)
     return "MANUAL TVC", (0.18, 0.24, 0.31, 0.94)
+
+  def _overlay_font_for_label(self, label: str, rectangle_width: int):
+    """Use the large font only when its measured glyphs fit the rectangle."""
+
+    available_width = max(int(rectangle_width) - 12, 1)
+    if (
+      self._text_width_pixels(label, self.context.charWidthBig)
+      <= available_width
+    ):
+      return mujoco.mjtFont.mjFONT_BIG
+    return mujoco.mjtFont.mjFONT_NORMAL
 
   @classmethod
   def _point_in_engine_button(
@@ -2272,7 +2429,7 @@ class RocketWindow:
       label = "FUEL DEPLETED"
     mujoco.mjr_rectangle(rect, *color)
     mujoco.mjr_overlay(
-      mujoco.mjtFont.mjFONT_BIG,
+      self._overlay_font_for_label(label, rect.width),
       mujoco.mjtGridPos.mjGRID_TOPLEFT,
       rect,
       label,
@@ -2311,7 +2468,7 @@ class RocketWindow:
       land_label = "AUTO LAND"
     mujoco.mjr_rectangle(land_rect, *land_color)
     mujoco.mjr_overlay(
-      mujoco.mjtFont.mjFONT_BIG,
+      self._overlay_font_for_label(land_label, land_rect.width),
       mujoco.mjtGridPos.mjGRID_TOPLEFT,
       land_rect,
       land_label,
@@ -2336,7 +2493,7 @@ class RocketWindow:
       hover_label = "HOVER HOLD"
     mujoco.mjr_rectangle(hover_rect, *hover_color)
     mujoco.mjr_overlay(
-      mujoco.mjtFont.mjFONT_BIG,
+      self._overlay_font_for_label(hover_label, hover_rect.width),
       mujoco.mjtGridPos.mjGRID_TOPLEFT,
       hover_rect,
       hover_label,
@@ -2440,7 +2597,7 @@ class RocketWindow:
     indicator_label, indicator_color = self._controller_indicator_style()
     mujoco.mjr_rectangle(indicator_rect, *indicator_color)
     mujoco.mjr_overlay(
-      mujoco.mjtFont.mjFONT_BIG,
+      self._overlay_font_for_label(indicator_label, indicator_rect.width),
       mujoco.mjtGridPos.mjGRID_TOPLEFT,
       indicator_rect,
       indicator_label,
@@ -2450,6 +2607,7 @@ class RocketWindow:
 
   def _render(self) -> None:
     framebuffer_width, framebuffer_height = glfw.get_framebuffer_size(self.window)
+    window_width, _ = glfw.get_window_size(self.window)
     viewport = mujoco.MjrRect(0, 0, framebuffer_width, framebuffer_height)
     mujoco.mjv_updateScene(
       self.simulation.model,
@@ -2465,10 +2623,28 @@ class RocketWindow:
     telemetry = list(self.simulation.telemetry_lines())
     if time.monotonic() < self.status_until:
       telemetry.append(f"STATUS: {self.status_message}")
+    scale_x = (
+      framebuffer_width / window_width if window_width > 0 else 1.0
+    )
+    panel_x, _ = self._control_panel_rect_window(window_width)
+    telemetry_width = max(int((panel_x - 12.0) * scale_x), 1)
+    telemetry = list(
+      self._wrap_overlay_lines(
+        telemetry,
+        telemetry_width,
+        self.context.charWidth,
+      )
+    )
+    telemetry_viewport = mujoco.MjrRect(
+      viewport.left,
+      viewport.bottom,
+      telemetry_width,
+      viewport.height,
+    )
     mujoco.mjr_overlay(
       mujoco.mjtFont.mjFONT_NORMAL,
       mujoco.mjtGridPos.mjGRID_TOPLEFT,
-      viewport,
+      telemetry_viewport,
       "\n".join(telemetry),
       "",
       self.context,

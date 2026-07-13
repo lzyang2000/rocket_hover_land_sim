@@ -20,6 +20,7 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 - Paper-inspired 20–80% throttle interval with a nonzero minimum after ignition.
 - Fuel consumption with shared dry-stage/LOX/RP-1 center-of-mass and inertia modeling in MuJoCo and MPC.
 - Keyboard and clickable GUI flight controls.
+- DPI-aware responsive GUI sizing for Retina, standard-density, and smaller displays.
 - Live directional indicators and a thrust slider that follow automatic guidance commands.
 - Live 3-D engine arrow whose direction follows gimbal and whose length follows thrust magnitude.
 - Three-dimensional hover/position hold.
@@ -86,7 +87,9 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.18`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.19`.
+
+The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
 ## Controls
 

@@ -640,6 +640,58 @@ def test_kill_button_hitbox_matches_drawn_rectangle() -> None:
   )
 
 
+def test_gui_layout_scales_for_small_and_large_windows() -> None:
+  assert RocketWindow._fit_window_size_to_work_area(1920, 1080) == (1280, 820)
+  assert RocketWindow._fit_window_size_to_work_area(1366, 768) == (1256, 691)
+  assert RocketWindow._fit_window_size_to_work_area(800, 600) == (736, 540)
+  assert RocketWindow._fit_window_size_to_work_area(500, 400) == (500, 400)
+
+  for window_width in (500, 640, 900, 1280, 1920):
+    panel_x, panel_width = RocketWindow._control_panel_rect_window(window_width)
+    assert panel_x >= 0.0
+    assert panel_width > 0.0
+    assert panel_x + panel_width <= window_width
+    rectangles = (
+      RocketWindow._engine_button_rect_window(window_width),
+      RocketWindow._hover_button_rect_window(window_width),
+      RocketWindow._land_button_rect_window(window_width),
+      RocketWindow._thrust_slider_rect_window(window_width),
+      RocketWindow._controller_indicator_rect_window(window_width),
+      *RocketWindow._direction_button_rects_window(window_width).values(),
+    )
+    for x, _, width, _ in rectangles:
+      assert panel_x <= x
+      assert x + width <= panel_x + panel_width + 1e-9
+
+
+def test_gui_font_scale_tracks_framebuffer_density() -> None:
+  assert RocketWindow._font_scale_for_display(1280, 820, 1280, 820) == 100
+  assert RocketWindow._font_scale_for_display(1280, 820, 1600, 1025) == 100
+  assert RocketWindow._font_scale_for_display(1280, 820, 1920, 1230) == 150
+  assert RocketWindow._font_scale_for_display(1280, 820, 2560, 1640) == 200
+
+
+def test_gui_overlay_wraps_and_uses_smaller_font_when_needed() -> None:
+  character_widths = [10] * 128
+  assert RocketWindow._text_width_pixels("ABC", character_widths) == 30
+  assert RocketWindow._wrap_overlay_lines(
+    ["ENGINE OFF THROTTLE"], 80, character_widths
+  ) == ("ENGINE", "OFF", "THROTTLE")
+
+  window = RocketWindow.__new__(RocketWindow)
+  window.context = type(
+    "FakeContext", (), {"charWidthBig": character_widths}
+  )()
+  assert (
+    window._overlay_font_for_label("ABC", 50)
+    is mujoco.mjtFont.mjFONT_BIG
+  )
+  assert (
+    window._overlay_font_for_label("ABC", 35)
+    is mujoco.mjtFont.mjFONT_NORMAL
+  )
+
+
 def test_engine_off_rocket_settles_without_attitude_controller_vibration() -> None:
   simulation = RocketSimulation()
   vertical_speeds = []
