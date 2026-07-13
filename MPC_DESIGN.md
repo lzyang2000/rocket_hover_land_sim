@@ -8,6 +8,8 @@ This document specifies the real-time controller used by the MuJoCo rocket landi
 
 The paper solves a free-final-time trajectory-optimization problem. This project repeatedly solves a shorter fixed-horizon problem and applies only the first command, producing a receding-horizon model predictive controller.
 
+This document is the optimizer specification. [METHODS.md](METHODS.md) explains the complete plant, PD controller, auto-land state machine, and paper mapping. A useful reading order is: state and control in Sections 2–3, SCvx in Section 4, then runtime ownership and rejection rules in Sections 5–6.
+
 ## 2. Scope
 
 The prediction state is
@@ -71,6 +73,8 @@ x_{k+1}\approx A_kx_k+B_ku_k+c_k+\nu_k.
 
 The virtual control `nu_k` follows the paper’s artificial-infeasibility safeguard and receives a 300,000 scaled L1 penalty. This prevents high-energy tracking error from being hidden as artificial state motion. Scaled trust regions keep each convex solution near the trajectory about which the dynamics were linearized.
 
+Virtual control is not an actuator. It is a numerical escape hatch that keeps an early convex approximation feasible. A successful physical trajectory should require almost none of it, which is why the independent nonlinear rollout defect is checked before any result is trusted.
+
 The numerical Jacobian uses forward finite differences during hover and reuses the nominal RK4 propagation for all perturbations at a node. Landing uses central differences for additional trajectory-linearization accuracy. Fuel-dependent mass properties are cached by mass in both modes. This preserves the eight-step, three-iteration controller while reducing the dominant hover linearization cost rather than shortening the horizon.
 
 Each convex subproblem includes:
@@ -86,6 +90,16 @@ Each convex subproblem includes:
 
 CVXPY constructs the SOCP and Clarabel solves it. The previous prediction is shifted forward to warm-start the next solve.
 
+The principal tuning quantities have different jobs:
+
+| Quantity | If too small | If too large |
+| --- | --- | --- |
+| Prediction horizon | Controller cannot see enough stopping distance | Larger, slower conic problem |
+| Trust radius | Progress can stall | Linear model may be used too far from its nominal trajectory |
+| Virtual-control penalty | Artificial state motion can dominate | Numerical conditioning can worsen |
+| Successive iterations | Linearization may remain inaccurate | Solve latency increases |
+| Defect threshold | Valid solutions are rejected | Physically inconsistent solutions may be accepted |
+
 ## 5. Receding-horizon operation
 
 Hover and auto-land provide a moving target state to the MPC. A target with nonzero velocity is expanded into a time-varying reference trajectory, with reference position advanced by `k * prediction_dt * target_velocity` at each prediction node. The optimizer runs at a lower rate than MuJoCo physics.
@@ -95,6 +109,16 @@ The interactive launcher solves synchronously by default, so physics waits and t
 Async results are rejected if they are stale, exceed position/velocity/attitude/angular-rate mismatch limits, expire, or no longer correspond closely enough to the latest target. Accepted references are shifted and blended toward the current GUI or landing target. Hover uses a 1.05 s preview and a moderately higher feedback gain; landing uses one 0.35 s prediction interval and the original deterministic gain for alignment damping. Both use the latest requested velocity and suppress horizontal acceleration feed-forward because gimbal counter-steering makes the rocket's initial translational response non-minimum-phase. Vertical feed-forward remains magnitude-limited. Telemetry distinguishes `SCVX MPC ASYNC+INNER` from synchronous direct MPC, terminal control, and PD control.
 
 If the solver is unavailable, infeasible, numerically invalid, or exceeds the accepted defect threshold, the simulator immediately uses a deterministic six-degree-of-freedom PD controller. Solver failure therefore cannot remove attitude stabilization or leave stale unbounded commands active.
+
+An MPC result passes through this acceptance pipeline:
+
+1. solver status must be acceptable;
+2. state and control arrays must be finite;
+3. optimized controls are rolled through the nonlinear prediction model;
+4. normalized nonlinear defect must be at most 0.20;
+5. async mode additionally checks age, current-state mismatch, target shift, and trajectory expiration.
+
+“More accepted” is useful only if this safety pipeline remains intact. Raising the virtual-control penalty from 8,000 to 300,000 improved the full-throttle landing from zero accepted solves to about 72% while keeping the nonlinear-defect limit unchanged and preserving the sub-100 kg landing regression.
 
 The simulator uses scheduled MPC gimbal bounds of 5° during hover and 6° during high-altitude landing, both inside the 20° mechanical limit, and accepts solutions up to a 0.20 normalized nonlinear rollout defect. The deterministic automatic PD controller retains a 6° recovery envelope. Hover position commands are limited to a 3.5 m horizontal and 2 m vertical lead relative to the plant. During landing, MPC owns alignment and descent above 7 m; a deterministic terminal PD controller then performs the final approach under the tighter low-altitude gimbal schedule. This intentional handoff is reported separately from MPC-rejection PD ownership.
 

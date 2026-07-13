@@ -6,6 +6,46 @@ The MuJoCo vehicle and controller are six-degree-of-freedom. Thrust limits origi
 
 For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the optimizer specification and explicit scope boundaries, see [MPC_DESIGN.md](MPC_DESIGN.md).
 
+## What this project is for
+
+This is a teaching and experimentation project, not a flight-qualified Falcon 9 simulator. It is designed to make several ideas visible in one runnable system:
+
+- why a nonzero minimum-thrust engine creates a hybrid on/off control problem;
+- how thrust applied below the center of mass couples translation to pitch and yaw;
+- why a single axial engine needs a separate roll actuator;
+- how a moving center of mass changes inertia and the engine moment arm;
+- how MPC differs from a high-rate PD controller;
+- why optimized trajectories must be checked against the nonlinear plant;
+- how ballistic coast can save fuel before a landing burn.
+
+The software is easiest to understand as four layers:
+
+```mermaid
+flowchart LR
+  G["User commands and auto-land state machine"] --> R["Position, velocity, and attitude references"]
+  R --> M["SCvx MPC<br/>finite-horizon optimizer"]
+  R --> P["200 Hz 6-DOF PD controller"]
+  M -->|"accepted command in sync mode<br/>accepted trajectory in async mode"| A["Thrust, gimbal, and roll-RCS allocation"]
+  M -->|"unavailable or rejected"| P
+  P --> A
+  A --> J["MuJoCo 6-DOF plant and contacts"]
+  J --> S["Measured mass, pose, and velocity"]
+  S --> M
+  S --> P
+```
+
+The auto-land phase (`ALIGN`, `COAST`, `DESCEND`, or `TERMINAL`) answers “what should the rocket do next?” MPC or PD answers “what bounded actuator command should track that request?” MuJoCo answers “what actually happens?”
+
+## Suggested learning path
+
+1. Start in manual mode and find the approximately 40.9% hover throttle. Notice that the lit engine cannot command anything between zero and 20%.
+2. Enable hover, tap WASD, and watch the engine initially counter-gimbal to rotate the tall stage before translating it.
+3. Climb to roughly 40 m, start auto-land, and watch `ALIGN → COAST → DESCEND → TERMINAL` along with leg deployment.
+4. Try a high-altitude vertical flight and observe the stopping-distance relight gate and energy-based descent corridor.
+5. Compare `MPC ACTIVE` and `PD ACTIVE`. An MPC rejection is a checked numerical result, not a loss of control authority.
+6. Run with `--async-mpc` and compare smoother rendering against delayed-trajectory rejection.
+7. Read [METHODS.md](METHODS.md) for the equations, then [MPC_DESIGN.md](MPC_DESIGN.md) for optimizer-specific choices and acceptance rules.
+
 ## What is included
 
 - MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, moving center of mass, inertia, and contact.
@@ -50,7 +90,8 @@ brew install uv
 From the project directory:
 
 ```bash
-cd /Users/yangl/Documents/rocket
+git clone https://github.com/lzyang2000/rocket_hover_land_sim.git
+cd rocket_hover_land_sim
 uv sync --extra dev
 uv run rocket-landing
 ```
@@ -70,17 +111,17 @@ In asynchronous mode the optimizer supplies a timestamped nonlinear reference tr
 ## Setup with a standard virtual environment
 
 ```bash
-cd /Users/yangl/Documents/rocket
+git clone https://github.com/lzyang2000/rocket_hover_land_sim.git
+cd rocket_hover_land_sim
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 rocket-landing
 ```
 
-This workspace already has a local environment, so it can also be launched directly:
+After the environment has been created, it can also be launched directly from the project root:
 
 ```bash
-cd /Users/yangl/Documents/rocket
 .venv/bin/rocket-landing
 ```
 
@@ -194,7 +235,7 @@ The four landing legs remain folded upward against the fuselage during reset, ma
 
 While the engine is lit outside auto-land, the simulator estimates the propellant needed to land and triggers once fuel reaches `1.05 ×` that estimate. Offset or tilted states retain the conservative powered-alignment model: 2.5 seconds of capture allowance, 10% time/impulse margins, a 250 kg terminal reserve, and a strong lateral controllability floor. An already centered, upright high-altitude state instead uses a direct-coast estimate based on its ballistic apex, predicted ignition speed, powered-burn time, current mass, and only a 50 kg fixed reserve. This prevents the emergency controller from burning tonnes at minimum thrust merely to arrest an otherwise harmless upward coast.
 
-In the full-throttle-from-launch regression, fuel auto now takes over near 5.15 tonnes at roughly 920 m and +144 m/s, coasts immediately, and lands with about 70 kg remaining. A stationary aligned 1,000 m vacuum descent takes over near 4.0 tonnes and lands with about 45 kg. These are deterministic results for the current simulator, not certified real-vehicle reserves; offset states deliberately trigger earlier.
+In the full-throttle-from-launch regression, fuel auto now takes over near 5.15 tonnes at roughly 920 m and +144 m/s, coasts immediately, and lands with roughly 70–85 kg remaining depending on MPC ownership; the regression requirement is below 100 kg. A stationary aligned 1,000 m vacuum descent under PD control takes over near 4.0 tonnes and lands with about 45 kg. These are deterministic results for the current simulator, not certified real-vehicle reserves; offset states deliberately trigger earlier.
 
 To prevent low-altitude hunting, the physical gimbal follows commands through an actuator lag and is limited to 3° below 5 m, 1.5° below 2.5 m, and 0.75° in the final meter. Very small terminal commands enter a 0.15° deadband.
 
@@ -250,6 +291,8 @@ The precise description is: **a coupled 6-DOF MuJoCo plant controlled by SCvx-in
 
 ## Relationship to the paper
 
+The attached 2013 lossless-convexification paper is an academic soft-landing optimal-control paper, not a publication of Falcon 9 flight software. Lars Blackmore later led landing work at SpaceX, which is why the paper is often discussed in that context. This repository borrows the paper's mathematical constraints and combines them with the later 6-DOF SCvx literature; it does not claim to reproduce SpaceX guidance or vehicle parameters.
+
 Implemented from the 2013 and 2020 papers:
 
 - translational powered-descent dynamics;
@@ -286,6 +329,22 @@ Or with `uv`:
 ```bash
 uv run pytest -q
 ```
+
+## Suggested experiments
+
+Each experiment isolates one control concept:
+
+| Experiment | Procedure | What to observe |
+| --- | --- | --- |
+| Minimum thrust | Ignite, then reduce throttle fully | Thrust stops at 20% until a discrete coast/kill transition |
+| Translation–attitude coupling | Hover and tap one WASD key | Initial counter-gimbal rotates the stage before lateral motion develops |
+| MPC validation | Watch `MPC ACTIVE` and `PD ACTIVE` during landing | Optimizer output is used only after nonlinear-defect validation |
+| Ballistic landing | Begin a centered landing above 32 m | Fuel flow reaches zero during `COAST`, then relight occurs from stopping distance |
+| Fuel emergency | Launch vertically at full throttle and wait | Fuel auto skips wasteful powered alignment and lands with a small deterministic reserve |
+| Async latency | Compare default and `--async-mpc` | Async rendering is smoother, but stale or mismatched trajectories are rejected |
+| Terminal control | Watch the final 7 m | Control intentionally switches to terminal PD as gimbal authority tightens |
+
+When changing gains or constraints, run the complete test suite and repeat at least the hover, offset landing, high-energy landing, and ground-settling experiments.
 
 ## Project layout
 
@@ -325,6 +384,24 @@ After `KILL ENGINE`, restart is intentionally latched out. Press `R` for a new f
 ### Manual WASD appears to move in an unexpected screen direction
 
 Controls use world X/Y axes. The camera can rotate independently.
+
+## Glossary
+
+| Term | Meaning in this project |
+| --- | --- |
+| Plant | The authoritative MuJoCo rigid-body and contact simulation |
+| Guidance | Logic that creates desired position, velocity, and attitude references |
+| Controller | Logic that converts references and measured state into actuator commands |
+| 6-DOF | Three translational plus three rotational degrees of freedom |
+| MPC | Repeated finite-horizon optimization using the current measured state |
+| SCvx | Successive convexification: repeatedly linearize nonlinear dynamics and solve convex subproblems |
+| PD | Proportional–derivative feedback on position/velocity and attitude/angular rate |
+| Virtual control | A numerical feasibility variable inside SCvx; it is not a physical actuator |
+| Nonlinear defect | Mismatch between the convex predicted state and an independent nonlinear rollout |
+| Warm start | Shift the previous MPC solution forward to initialize the next solve |
+| Coast | Zero main-engine thrust with the engine still armed for automatic relight |
+| Terminal control | Intentional low-altitude PD mode below the 7 m handoff |
+| TVC | Thrust-vector control through engine gimballing |
 
 ## Follow-up fully coupled 6-DOF literature
 

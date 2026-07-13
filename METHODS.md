@@ -10,6 +10,30 @@ The 2013 paper supplies the translational soft-landing equations, mass depletion
 
 The implementation is an engineering adaptation rather than a reproduction of either numerical experiment. The exact controller specification and explicit non-goals are in [MPC_DESIGN.md](MPC_DESIGN.md).
 
+The 2013 reference is an academic optimal-control paper, not a description of Falcon 9 flight software. The simulator uses its constraint structure as a teaching model, then adds approximate Falcon 9-like dimensions and the later 6-DOF SCvx formulation.
+
+### How to read this document
+
+- Sections 1–4 define the simulated physics, mass model, and actuator limits.
+- Sections 5–7 explain SCvx, MPC acceptance, and the deterministic PD controller.
+- Sections 8–9 connect keyboard input and auto-land phases to control references.
+- Sections 10–13 state the paper mapping, terminology, code locations, and verification coverage.
+
+### Notation at a glance
+
+| Symbol | Meaning |
+| --- | --- |
+| $r_O$ | MuJoCo body-reference position |
+| $r_C$ | Current center-of-mass position used by guidance and MPC |
+| $v_C$ | Current center-of-mass velocity |
+| $R(q)$ | Body-to-world rotation matrix from quaternion $q$ |
+| $T$ | Main-engine thrust magnitude |
+| $\delta$ | Two-axis gimbal-angle vector |
+| $\tau_r$ | Equivalent roll moment produced by the RCS force pair |
+| $m$, $J(m)$ | Current mass and fuel-dependent inertia tensor |
+| $\nu_k$ | SCvx virtual-control variable; numerical, not physical |
+| $r_d$, $v_d$ | Desired position and velocity references |
+
 ## 1. Frames and state
 
 The world frame is a nonrotating local Earth frame:
@@ -99,6 +123,8 @@ The modeled force limit is 5 kN per pod, producing at most 17.5 kN m. A 0.10 s f
 
 MuJoCo remains the authoritative plant. The MPC model is propagated with RK4 over each prediction interval, and quaternions are normalized after propagation.
 
+The central teaching point is that translation and rotation are coupled. Tilting thrust creates horizontal acceleration, but because the engine is below the COM it also creates angular acceleration. A controller cannot command lateral motion independently of attitude and still represent the rigid-body physics.
+
 ## 3. Falcon 9-like scale and mass depletion
 
 The exterior geometry follows public Falcon 9 first-stage dimensions:
@@ -154,6 +180,8 @@ T_{nominal}=720\text{ kN},
 \]
 
 Before ignition, thrust is exactly zero. While lit, it cannot enter the forbidden interval between zero and 144 kN. The kill command is a deliberate hybrid transition directly from valid positive thrust to zero.
+
+This is why throttle is not modeled as an ordinary continuously variable input over $[0,T_{max}]$. The system has discrete engine modes (`OFF`, `LIT`, relightable `COAST`, and permanent `SHUTDOWN`) plus a continuous positive-thrust command while lit.
 
 The MPC control vector is
 
@@ -211,6 +239,8 @@ The virtual control `nu_k` is the artificial-infeasibility safeguard used in the
 
 Scaled trust regions bound deviations from the nominal state and control trajectories. They address artificial unboundedness and keep first-order dynamics approximations locally meaningful.
 
+Intuitively, SCvx repeatedly “freezes” the curvature of the nonlinear dynamics around the current guess, solves a tractable convex approximation, and uses that solution as the next guess. Virtual control prevents a poor first guess from making the subproblem impossible; its large penalty prevents it from becoming a shortcut around the real physics.
+
 ## 6. Convex subproblem
 
 Each CVXPY subproblem includes:
@@ -265,6 +295,16 @@ Every result is checked for solver status, finite values, actuator bounds, and n
 
 The stronger virtual-control penalty matters most at high-energy landing-burn ignition. With the earlier weight of 8,000, the first nominally optimal full-throttle landing solve used about 1.30 scaled virtual control and produced about 1.30 nonlinear defect, far above the 0.20 acceptance limit. At 300,000, the same state solves with roughly 0.005 defect and a physically correct maximum-thrust first command. Across the complete deterministic regression, about 72% of MPC attempts above the terminal handoff are accepted instead of none; rejected attempts remain under PD control.
 
+Acceptance is deliberately stricter than “the convex solver returned optimal”:
+
+1. Clarabel must return an acceptable solve status.
+2. Predicted states and controls must be finite and remain inside actuator bounds.
+3. The optimized controls are rolled through the nonlinear 6-DOF model.
+4. The normalized convex-versus-nonlinear defect must not exceed 0.20.
+5. Async mode additionally checks result age, state mismatch, trajectory lifetime, and target movement.
+
+The nonlinear rollout check is what prevents virtual control or a poor local linearization from silently becoming a physical command.
+
 Telemetry distinguishes:
 
 - `SCVX MPC: OPTIMAL`;
@@ -298,6 +338,8 @@ F_d=m(a_d-g),
 \]
 
 then clips thrust magnitude to the 20–80% interval and force direction to the active gimbal cone. The SO(3) attitude PD law below turns the desired force direction into pitch/yaw gimbal torque and roll-RCS torque. `TERMINAL ACTIVE` uses the same coupled PD structure with the scheduled low-altitude gimbal limits and deadband; it is an intentional mode, not an MPC rejection.
+
+The proportional term reacts to displacement from the requested trajectory. The derivative term reacts to relative velocity and supplies damping. PD is inexpensive and runs every physics step, but unlike MPC it does not explicitly plan several future constrained states.
 
 This PD controller can reject modest drag-model error or wind disturbance after those forces create position and velocity error, provided enough thrust and gimbal authority remain. It is not sufficient by itself for a credible atmospheric landing model. There is no integral action, wind-state estimator, disturbance observer, relative-airspeed feedforward, dynamic-pressure gain scheduling, or aerodynamic force/moment prediction. Strong steady wind can therefore create offset, and gusts can exceed the available attitude or lateral-force bandwidth.
 
@@ -449,7 +491,7 @@ where
 \gamma(v_z)=\max\left(0.89,\;0.95-0.0006\max(v_z,0)\right).
 \]
 
-The factor approximates mass depletion over the long burn and was calibrated against deterministic full-flight rollouts. The normal external 1.05 takeover multiplier still applies. A full-throttle vertical launch crosses this estimate near 5.15 tonnes and finishes near 70 kg; a stationary 1,000 m case crosses near 4.0 tonnes and finishes near 45 kg.
+The factor approximates mass depletion over the long burn and was calibrated against deterministic full-flight rollouts. The normal external 1.05 takeover multiplier still applies. A full-throttle vertical launch crosses this estimate near 5.15 tonnes and finishes with roughly 70–85 kg depending on MPC ownership; the automated regression requires less than 100 kg. A stationary 1,000 m PD-controlled case crosses near 4.0 tonnes and finishes near 45 kg.
 
 If direct coast is unsafe because lateral or attitude correction is still required, the estimator retains the powered-alignment branch below.
 
@@ -535,7 +577,20 @@ Yes, with an important terminology distinction:
 
 The project does not yet reproduce the paper's entire mission-level optimal-control problem, but it no longer uses a 3-DOF guidance law with an idealized pitch/yaw assist.
 
-## 12. Verification
+## 12. Code map
+
+| Concept | Main implementation location |
+| --- | --- |
+| Engine modes, throttle bounds, and fuel flow | `src/rocket_landing/controller.py` |
+| Draining-tank COM and inertia | `src/rocket_landing/mass_properties.py` |
+| Nonlinear 14-state model and SCvx solver | `src/rocket_landing/mpc.py` |
+| Guidance phases, PD controller, actuator dynamics, and GUI | `src/rocket_landing/sim.py` |
+| MuJoCo geometry, joints, contacts, and actuator sites | `src/rocket_landing/assets/rocket.xml` |
+| Behavioral examples and regressions | `tests/` |
+
+For a teaching-oriented code reading, start with `RocketSimulation.step()` in `sim.py`, follow `_update_landing_guidance()` to see how references are created, then compare `_update_hover_controller()`, `_pd_hover_guidance()`, and `SixDofMPC.solve()`.
+
+## 13. Verification
 
 The test suite covers:
 
