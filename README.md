@@ -27,9 +27,9 @@ For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the o
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
 - Relightable high-altitude ballistic coast with a dynamic landing-burn gate.
 - Automatic landing takeover at 1.05 times the estimated landing-fuel reserve.
-- Deterministic 6-DOF fallback control if an MPC solve fails.
+- Deterministic 6-DOF PD control when an MPC solve is unavailable or rejected.
 - A controller-owner badge that reports `MPC ACTIVE`, `TERMINAL ACTIVE`,
-  `FALLBACK ACTIVE`, or `MANUAL TVC`.
+  `PD ACTIVE`, or `MANUAL TVC`.
 
 ## Requirements
 
@@ -88,7 +88,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.22`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.23`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -148,7 +148,7 @@ Releasing WASD returns thrust toward vertical but does not remove existing horiz
 
 Press `H` or click `HOVER HOLD`. The controller captures the current 3-D position and starts synchronous 6-DOF successive-convexification MPC by default. It predicts mass, position, velocity, quaternion attitude, and angular velocity over a finite horizon, then applies the first bounded thrust/gimbal/roll command before physics advances again.
 
-With `--async-mpc`, SCvx becomes the slower trajectory-guidance layer and the 200 Hz deterministic 6-DOF controller becomes the actuator layer. Telemetry reports this as `SCVX MPC ASYNC+INNER`; rejected or unavailable predictions switch immediately to `6-DOF FALLBACK` with the rejection reason when available.
+With `--async-mpc`, SCvx becomes the slower trajectory-guidance layer and the 200 Hz deterministic 6-DOF PD controller becomes the actuator layer. Telemetry reports this as `SCVX MPC ASYNC+INNER`; rejected or unavailable predictions switch immediately to `6-DOF PD` with the rejection reason when available.
 
 In hover mode:
 
@@ -156,9 +156,9 @@ In hover mode:
 - Up/Down moves the altitude target at 2 m/s;
 - releasing the controls leaves the target fixed and the controller settles there.
 
-WASD remains position-target driven: the position error and measured rocket velocity provide the PD/MPC feedback needed to track the moving waypoint. The controller does not falsely label the waypoint itself as travelling at 3 m/s. The horizontal target is limited to a 3.5 m lead and the altitude target to a 2 m lead relative to the rocket; holding a key keeps advancing this bounded “carrot” as the vehicle moves instead of allowing a large error to accumulate. Manual WASD steering also reaches its requested gimbal direction 50% faster. Because the gimbaled engine is below the center of mass, the rocket still briefly counter-gimbals to create the required tilt, but hover MPC commands are limited to 5° of gimbal to suppress swinging. The automatic actuator/fallback envelope and high-altitude landing limit remain 6°.
+WASD remains position-target driven: the position error and measured rocket velocity provide the PD/MPC feedback needed to track the moving waypoint. The controller does not falsely label the waypoint itself as travelling at 3 m/s. The horizontal target is limited to a 3.5 m lead and the altitude target to a 2 m lead relative to the rocket; holding a key keeps advancing this bounded “carrot” as the vehicle moves instead of allowing a large error to accumulate. Manual WASD steering also reaches its requested gimbal direction 50% faster. Because the gimbaled engine is below the center of mass, the rocket still briefly counter-gimbals to create the required tilt, but hover MPC commands are limited to 5° of gimbal to suppress swinging. The automatic PD recovery envelope and high-altitude landing limit remain 6°.
 
-Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC` appears when the optional background-worker mode is selected. `6-DOF FALLBACK` means a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude controller handoff. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `FALLBACK ACTIVE`, or gray `MANUAL TVC`.
+Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC` appears when the optional background-worker mode is selected. `6-DOF PD` means the deterministic PD controller owns the vehicle because a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude PD handoff. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `PD ACTIVE`, or gray `MANUAL TVC`.
 
 Synchronous mode can pause rendering and input briefly during a solve—typically around 70–150 ms after warm-up on the development Mac—but it avoids applying a command computed from an older rocket state and an older WASD target. Async mode keeps the window smoother at the cost of that command latency.
 
@@ -171,6 +171,8 @@ The state machine supplies moving position and velocity references to the 6-DOF 
 If alignment finishes above 32 m while the stage is nearly upright and dynamically quiet, auto-land enters `COAST`: main-engine thrust and fuel flow go to zero, the GUI reports `LAND: COAST`, the thrust slider moves to zero, and the roll RCS remains available. The engine automatically relights at maximum commanded throttle when the current stopping-distance gate is reached. After a long coast, descent follows an energy-based speed corridor rather than immediately braking to the fixed 12 m/s band; this lets a 1,000 m vacuum drop peak near 90 m/s, relight around 590 m, and progressively brake to landing without wasting fuel in a several-hundred-metre powered hover-like descent. Tilt above 5°, angular rate above 0.25 rad/s, lateral error above 2.75 m, or horizontal speed above 1.5 m/s commands an early relight. Low-altitude landings skip coast entirely. `KILL ENGINE` remains a permanent shutdown and is deliberately separate from this armed coast state.
 
 This high-altitude result is a vacuum rigid-body demonstration. Aerodynamic drag, wind, grid-fin authority, and atmospheric attitude stabilization are not yet modeled, so it should not be read as a realistic Falcon 9 entry simulation.
+
+The PD controller can correct modest unmodeled forces after they produce position and velocity error, but PD feedback alone is not enough for a credible wind-and-drag simulation. Atmospheric work should add relative-airspeed aerodynamic forces and moments, wind/disturbance estimation, integral or disturbance-observer action, and dynamic-pressure/angle-of-attack scheduling for grid-fin and engine authority. Robust MPC can then plan with those forces and constraints instead of relying entirely on reactive PD correction.
 
 After relight, guidance uses an aggressive approach with terminal braking:
 
@@ -295,7 +297,7 @@ uv run pytest -q
 │   ├── controller.py                 thrust bounds, gimbal cone, and fuel
 │   ├── mass_properties.py            dry stage and draining LOX/RP-1 model
 │   ├── mpc.py                        14-state SCvx MPC and nonlinear model
-│   ├── sim.py                        actuators, fallback, GUI, and rendering
+│   ├── sim.py                        actuators, PD control, GUI, and rendering
 │   └── assets/rocket.xml             vehicle, pad, contacts, and visuals
 └── tests/                             physics, guidance, landing, and GUI tests
 ```

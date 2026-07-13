@@ -143,7 +143,7 @@ GUI_PANEL_MARGIN = 22.0
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.22 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.9.23 - 6-DOF SCvx MPC"
 
 
 class LandingPhase(Enum):
@@ -282,7 +282,7 @@ class RocketSimulation:
     self._mpc_generation = 0
     self.last_mpc_result: MPCResult | None = None
     self.last_mpc_request_time = -math.inf
-    self.mpc_using_fallback = True
+    self.mpc_using_pd = True
     self._active_async_mpc_result: MPCResult | None = None
     self._active_async_mpc_request_time = -math.inf
     self._active_async_mpc_target_position = np.zeros(3, dtype=float)
@@ -359,7 +359,7 @@ class RocketSimulation:
     self._mpc_generation += 1
     self.last_mpc_result = None
     self.last_mpc_request_time = -math.inf
-    self.mpc_using_fallback = True
+    self.mpc_using_pd = True
     self._active_async_mpc_result = None
     self._active_async_mpc_request_time = -math.inf
     self._active_async_mpc_target_position[:] = 0.0
@@ -1231,7 +1231,7 @@ class RocketSimulation:
         )
       )
 
-  def _fallback_hover_guidance(
+  def _pd_hover_guidance(
     self,
     *,
     target_position: np.ndarray | None = None,
@@ -1239,7 +1239,7 @@ class RocketSimulation:
     feedforward_acceleration: np.ndarray | None = None,
     position_gain_scale: float = 1.0,
   ) -> None:
-    """High-rate constrained trajectory tracking and MPC fallback control."""
+    """High-rate constrained 6-DOF PD trajectory tracking control."""
 
     if not self.hover_enabled:
       return
@@ -1428,7 +1428,7 @@ class RocketSimulation:
     self._active_async_mpc_request_time = -math.inf
     self._active_async_mpc_target_position[:] = 0.0
     self._active_async_mpc_target_velocity[:] = 0.0
-    self.mpc_using_fallback = True
+    self.mpc_using_pd = True
     self.async_mpc_rejection_reason = reason
 
   def _accept_async_mpc_result(
@@ -1477,7 +1477,7 @@ class RocketSimulation:
     self._active_async_mpc_request_time = request_time
     self._active_async_mpc_target_position[:] = requested_target_position
     self._active_async_mpc_target_velocity[:] = requested_target_velocity
-    self.mpc_using_fallback = False
+    self.mpc_using_pd = False
     self.async_mpc_rejection_reason = ""
 
   def _track_async_mpc_trajectory(self) -> bool:
@@ -1552,7 +1552,7 @@ class RocketSimulation:
     # desired body direction. Vertical feed-forward does not have this
     # non-minimum-phase ambiguity.
     feedforward_acceleration[0:2] = 0.0
-    self._fallback_hover_guidance(
+    self._pd_hover_guidance(
       target_position=reference_position,
       target_velocity=reference_velocity,
       feedforward_acceleration=feedforward_acceleration,
@@ -1563,7 +1563,7 @@ class RocketSimulation:
       ),
     )
     self._allocate_attitude_control(self.controller.thrust_direction_world())
-    self.mpc_using_fallback = False
+    self.mpc_using_pd = False
     return True
 
   def _set_lateral_indicator_from_world_direction(
@@ -1586,7 +1586,7 @@ class RocketSimulation:
   def _apply_mpc_result(self, result: MPCResult) -> None:
     self.last_mpc_result = result
     if not result.success:
-      self.mpc_using_fallback = True
+      self.mpc_using_pd = True
       return
     command = result.control
     self.controller.throttle = float(
@@ -1613,7 +1613,7 @@ class RocketSimulation:
     self._set_lateral_indicator_from_world_direction(
       rotation @ gimbal_direction_body(self.engine_gimbal_command_radians)
     )
-    self.mpc_using_fallback = False
+    self.mpc_using_pd = False
 
   def _poll_mpc_result(self) -> None:
     if self._mpc_future is None or not self._mpc_future.done():
@@ -1714,8 +1714,8 @@ class RocketSimulation:
       return
     self._poll_mpc_result()
     if self.terminal_controller_active:
-      self.mpc_using_fallback = True
-      self._fallback_hover_guidance()
+      self.mpc_using_pd = True
+      self._pd_hover_guidance()
       self._allocate_attitude_control(self.controller.thrust_direction_world())
       return
     due = (
@@ -1730,13 +1730,13 @@ class RocketSimulation:
       self._request_mpc_solution()
     if self.asynchronous_mpc:
       if not self._track_async_mpc_trajectory():
-        self._fallback_hover_guidance()
+        self._pd_hover_guidance()
         self._allocate_attitude_control(
           self.controller.thrust_direction_world()
         )
       return
-    if not self.enable_mpc or self.mpc_using_fallback:
-      self._fallback_hover_guidance()
+    if not self.enable_mpc or self.mpc_using_pd:
+      self._pd_hover_guidance()
       self._allocate_attitude_control(self.controller.thrust_direction_world())
 
   @staticmethod
@@ -2107,13 +2107,13 @@ class RocketSimulation:
     elif self.hover_enabled and self.terminal_controller_active:
       control_line = "CTRL 6-DOF TERMINAL"
     elif self.hover_enabled and self.enable_mpc:
-      if self.mpc_using_fallback:
-        fallback_detail = (
+      if self.mpc_using_pd:
+        pd_detail = (
           f": {self.async_mpc_rejection_reason.upper()}"
           if self.async_mpc_rejection_reason
           else ""
         )
-        control_line = f"CTRL 6-DOF FALLBACK{fallback_detail}"
+        control_line = f"CTRL 6-DOF PD{pd_detail}"
       elif self.last_mpc_result is None:
         timing = "ASYNC" if self.asynchronous_mpc else "SYNC"
         control_line = f"CTRL SCVX MPC {timing}: WARMING"
@@ -2125,7 +2125,7 @@ class RocketSimulation:
           f"{self.last_mpc_result.solve_time_seconds * 1000:.0f} ms"
         )
     elif self.hover_enabled:
-      control_line = "CTRL 6-DOF FALLBACK"
+      control_line = "CTRL 6-DOF PD"
     else:
       control_line = "CTRL 6-DOF TVC"
     if self.landing_leg_deployment >= 1.0 - 1e-9:
@@ -2402,12 +2402,12 @@ class RocketWindow:
         return "TERMINAL ACTIVE", (0.20, 0.32, 0.68, 0.96)
       if (
         simulation.enable_mpc
-        and not simulation.mpc_using_fallback
+        and not simulation.mpc_using_pd
         and simulation.last_mpc_result is not None
         and simulation.last_mpc_result.success
       ):
         return "MPC ACTIVE", (0.02, 0.55, 0.38, 0.96)
-      return "FALLBACK ACTIVE", (0.82, 0.38, 0.02, 0.96)
+      return "PD ACTIVE", (0.82, 0.38, 0.02, 0.96)
     return "MANUAL TVC", (0.18, 0.24, 0.31, 0.94)
 
   def _overlay_font_for_label(self, label: str, rectangle_width: int):

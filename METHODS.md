@@ -236,7 +236,7 @@ Clarabel solves the conic problem. CVXPY parameters allow the compiled problem s
 
 The default horizon has eight intervals of 0.35 s, for a 2.8 s prediction window. Three successive-convexification iterations are performed per update. The previous solution is shifted forward as the next warm start.
 
-## 7. Receding-horizon execution and fallback
+## 7. Receding-horizon execution and deterministic PD control
 
 The paper primarily presents trajectory optimization. This simulator turns that machinery into MPC:
 
@@ -261,7 +261,7 @@ The preview reference is shifted and strongly blended toward the latest GUI or l
 
 Asynchronous MPC therefore never installs the delayed `MPCResult.control` vector. That raw first thrust/gimbal/roll command remains exclusive to synchronous mode. If no acceptable async trajectory exists, the same deterministic controller tracks the latest hover or landing target directly.
 
-Every result is checked for solver status, finite values, actuator bounds, and nonlinear rollout defect. Until the first valid solution arrives—or whenever a solve fails—the simulator uses a deterministic 6-DOF fallback controller. Failure cannot leave unconstrained or stale actuator commands active.
+Every result is checked for solver status, finite values, actuator bounds, and nonlinear rollout defect. Until the first valid solution arrives—or whenever a solve fails—the simulator uses a deterministic 6-DOF PD controller. Failure cannot leave unconstrained or stale actuator commands active.
 
 Telemetry distinguishes:
 
@@ -269,10 +269,37 @@ Telemetry distinguishes:
 - `SCVX MPC ASYNC+INNER: OPTIMAL`;
 - `SCVX MPC: WARMING`;
 - `6-DOF TERMINAL`;
-- `6-DOF FALLBACK`, including async rejection reasons such as `STALE`, `STATE_MISMATCH`, or `DYNAMICS_DEFECT`;
+- `6-DOF PD`, including async rejection reasons such as `STALE`, `STATE_MISMATCH`, or `DYNAMICS_DEFECT`;
 - manual `6-DOF TVC` control.
 
-The simulator uses a normalized nonlinear-defect acceptance limit of 0.20. This is less brittle than the previous 0.10 cutoff while remaining bounded by actuator limits and the independent MuJoCo plant. MPC gimbal authority is scheduled to 5° for hover and 6° for high-altitude landing, inside the 20° mechanical cone. The deterministic automatic controller can use the 6° envelope when stronger recovery authority is required.
+The simulator uses a normalized nonlinear-defect acceptance limit of 0.20. This is less brittle than the previous 0.10 cutoff while remaining bounded by actuator limits and the independent MuJoCo plant. MPC gimbal authority is scheduled to 5° for hover and 6° for high-altitude landing, inside the 20° mechanical cone. The deterministic PD controller can use the 6° envelope when stronger recovery authority is required.
+
+### Deterministic 6-DOF PD controller
+
+The translational PD law runs at the 0.005 s MuJoCo step:
+
+\[
+a_d=a_{ff}+K_p(r_d-r)+K_v(v_d-v),
+\]
+
+with
+
+\[
+K_p=\operatorname{diag}(0.12,0.12,0.80),\qquad
+K_v=\operatorname{diag}(0.70,0.70,1.80).
+\]
+
+It converts desired acceleration to world-frame force,
+
+\[
+F_d=m(a_d-g),
+\]
+
+then clips thrust magnitude to the 20–80% interval and force direction to the active gimbal cone. The SO(3) attitude PD law below turns the desired force direction into pitch/yaw gimbal torque and roll-RCS torque. `TERMINAL ACTIVE` uses the same coupled PD structure with the scheduled low-altitude gimbal limits and deadband; it is an intentional mode, not an MPC rejection.
+
+This PD controller can reject modest drag-model error or wind disturbance after those forces create position and velocity error, provided enough thrust and gimbal authority remain. It is not sufficient by itself for a credible atmospheric landing model. There is no integral action, wind-state estimator, disturbance observer, relative-airspeed feedforward, dynamic-pressure gain scheduling, or aerodynamic force/moment prediction. Strong steady wind can therefore create offset, and gusts can exceed the available attitude or lateral-force bandwidth.
+
+Adding drag and wind robustly requires at least a relative-air-velocity model $v_{air}=v-w$, aerodynamic force and center-of-pressure moment models, a wind/disturbance estimate, and either integral/disturbance-observer augmentation or robust MPC. Grid-fin authority and constraints should be scheduled with dynamic pressure and angle of attack rather than treated as fixed control authority.
 
 ## 8. Manual 6-DOF control
 
@@ -359,9 +386,9 @@ r_{d,k}=r_d+k\Delta t\,v_d,
 v_{d,k}=v_d.
 \]
 
-This is essential during powered descent: the previous formulation penalized position relative to one fixed altitude while also requesting nonzero downward velocity. That internally inconsistent target produced large nonlinear defects, frequent fallback selection, and abrupt controller changes.
+This is essential during powered descent: the previous formulation penalized position relative to one fixed altitude while also requesting nonzero downward velocity. That internally inconsistent target produced large nonlinear defects, frequent PD-controller selection, and abrupt controller changes.
 
-MPC owns hover, alignment, and the descent above 7 m. At 7 m the controller deliberately hands off to the deterministic coupled 6-DOF terminal law. The low-altitude law uses the same physical gimbal and roll actuators but is more robust when allowable gimbal authority tightens to 3°, 1.5°, and 0.75°. The GUI labels this scheduled mode `TERMINAL ACTIVE`; `FALLBACK ACTIVE` is reserved for genuine MPC warm-up or rejected solves.
+MPC owns hover, alignment, and the descent above 7 m. At 7 m the controller deliberately hands off to the deterministic coupled 6-DOF terminal PD law. The low-altitude law uses the same physical gimbal and roll actuators but is more robust when allowable gimbal authority tightens to 3°, 1.5°, and 0.75°. The GUI labels this scheduled mode `TERMINAL ACTIVE`; `PD ACTIVE` reports PD ownership during MPC warm-up or after a rejected solve.
 
 Engine cutoff normally occurs within 0.15 m of the landed body/leg reference height when horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, and vertical speed is between -0.50 and +0.15 m/s. A fuel-reserve takeover widens the first three limits to 0.30 m height, 1.00 m horizontal error, and 0.60 m/s horizontal speed. MuJoCo then resolves the residual motion through landing-leg contact and pad friction rather than spending emergency reserve on repeated terminal corrections.
 
@@ -465,7 +492,7 @@ The GUI displays the controller that currently owns the actuators:
 - `MPC ACTIVE` after a valid SCvx result is accepted;
 - `COAST ACTIVE` while the engine is armed at zero thrust;
 - `TERMINAL ACTIVE` during the scheduled final-approach handoff;
-- `FALLBACK ACTIVE` during MPC warm-up or after a rejected solve;
+- `PD ACTIVE` during MPC warm-up or after a rejected solve;
 - `MANUAL TVC` when hover and auto-land are inactive.
 
 The phase logic is intentionally separate from the optimizer. It provides interpretable reference generation while the MPC handles coupled six-degree-of-freedom tracking and actuator constraints.
@@ -499,7 +526,7 @@ The controller is tracking-oriented rather than a pure minimum-fuel planner. It 
 Yes, with an important terminology distinction:
 
 - The MuJoCo plant is mechanically 6-DOF.
-- The manual and fallback controllers regulate all three translation and all three rotation coordinates.
+- The manual and PD controllers regulate all three translation and all three rotation coordinates.
 - The MPC predicts and controls the complete 14-state mass/6-DOF rigid-body model.
 - Main-engine translation and pitch/yaw rotation are physically coupled through the engine moment arm.
 - Roll is controlled by an explicit opposed-force RCS couple because a single axial engine cannot generate roll moment.
@@ -519,9 +546,9 @@ The test suite covers:
 - zero-net-force RCS roll-couple allocation and actuator lag;
 - full heading and axial-spin recovery;
 - virtual-control/nonlinear-defect diagnostics;
-- forced solver failure and fallback selection;
+- forced solver failure and PD-controller selection;
 - hover braking and position recovery;
-- fallback and SCvx-MPC landing/cutoff rollouts;
+- PD and SCvx-MPC landing/cutoff rollouts;
 - stowed, progressive, latched, and reset landing-leg deployment;
 - ground settling and mass-update teleport regression;
 - GUI controls and indicators.

@@ -597,7 +597,7 @@ def test_mpc_offset_alignment_is_bounded_and_rarely_falls_back() -> None:
 
   assert simulation.start_landing()
   updates = 0
-  fallback_updates = 0
+  pd_updates = 0
   last_request_time = -1.0
   maximum_horizontal_speed = 0.0
   maximum_tilt_deg = 0.0
@@ -615,7 +615,7 @@ def test_mpc_offset_alignment_is_bounded_and_rarely_falls_back() -> None:
     if simulation.last_mpc_request_time != last_request_time:
       last_request_time = simulation.last_mpc_request_time
       updates += 1
-      fallback_updates += int(simulation.mpc_using_fallback)
+      pd_updates += int(simulation.mpc_using_pd)
     if simulation.landing_phase is LandingPhase.DESCEND:
       break
 
@@ -623,7 +623,7 @@ def test_mpc_offset_alignment_is_bounded_and_rarely_falls_back() -> None:
   assert maximum_horizontal_speed < 2.5
   assert maximum_tilt_deg < 8.0
   assert updates >= 10
-  assert fallback_updates <= max(1, updates // 5)
+  assert pd_updates <= max(1, updates // 5)
 
   saw_terminal_controller = False
   for _ in range(4000):

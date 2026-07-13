@@ -76,7 +76,7 @@ def test_mpc_tracks_a_wasd_style_moving_position_target() -> None:
 
   assert simulation.enable_hover()
   updates = 0
-  fallback_updates = 0
+  pd_updates = 0
   last_request_time = -1.0
   maximum_target_lead = 0.0
   maximum_tilt_deg = 0.0
@@ -106,7 +106,7 @@ def test_mpc_tracks_a_wasd_style_moving_position_target() -> None:
     if simulation.last_mpc_request_time != last_request_time:
       last_request_time = simulation.last_mpc_request_time
       updates += 1
-      fallback_updates += int(simulation.mpc_using_fallback)
+      pd_updates += int(simulation.mpc_using_pd)
     if step == 1599:
       position_after_eight_seconds = float(
         simulation.center_of_mass_position_world()[0]
@@ -120,4 +120,4 @@ def test_mpc_tracks_a_wasd_style_moving_position_target() -> None:
     simulation.hover_target_position[0], abs=0.15
   )
   assert abs(float(simulation.center_of_mass_velocity_world()[0])) < 0.10
-  assert fallback_updates <= max(1, updates // 10)
+  assert pd_updates <= max(1, updates // 10)

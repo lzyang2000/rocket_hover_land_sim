@@ -83,7 +83,7 @@ def test_mpc_warmup_does_not_mutate_the_vehicle() -> None:
   assert simulation.data.qvel == pytest.approx(qvel)
   assert simulation.controller.fuel_mass_kg == pytest.approx(fuel_mass_kg)
   assert simulation.last_mpc_result is None
-  assert simulation.mpc_using_fallback
+  assert simulation.mpc_using_pd
 
 
 def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
@@ -277,7 +277,7 @@ def test_roll_rcs_is_a_lagged_zero_net_force_couple() -> None:
   )
 
 
-def test_solver_failure_selects_safe_six_dof_fallback() -> None:
+def test_solver_failure_selects_safe_six_dof_pd_controller() -> None:
   simulation = RocketSimulation(enable_mpc=True)
 
   class FailingMPC:
@@ -299,7 +299,7 @@ def test_solver_failure_selects_safe_six_dof_fallback() -> None:
 
   simulation.mpc = FailingMPC()
   assert simulation.enable_hover()
-  assert simulation.mpc_using_fallback
+  assert simulation.mpc_using_pd
   for _ in range(100):
     simulation.step()
 
@@ -307,7 +307,7 @@ def test_solver_failure_selects_safe_six_dof_fallback() -> None:
   assert np.linalg.norm(simulation.engine_gimbal_radians) <= math.radians(20.0)
 
 
-def test_async_mpc_uses_fallback_while_first_solution_is_pending() -> None:
+def test_async_mpc_uses_pd_while_first_solution_is_pending() -> None:
   simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
 
   class SlowMPC:
@@ -331,7 +331,7 @@ def test_async_mpc_uses_fallback_while_first_solution_is_pending() -> None:
   simulation.mpc = SlowMPC()
   assert simulation.enable_hover()
   assert simulation._mpc_future is not None
-  assert simulation.mpc_using_fallback
+  assert simulation.mpc_using_pd
   assert simulation.controller.throttle > simulation.controller.limits.min_throttle
   simulation.close()
 
@@ -461,7 +461,7 @@ def test_async_inner_loop_shifts_reference_to_latest_target() -> None:
       }
     )
 
-  simulation._fallback_hover_guidance = capture_guidance
+  simulation._pd_hover_guidance = capture_guidance
   simulation._allocate_attitude_control = lambda *args, **kwargs: None
 
   assert simulation._track_async_mpc_trajectory()
@@ -525,7 +525,7 @@ def test_synchronous_mpc_still_applies_first_actuator_command_directly() -> None
 
   simulation.mpc = SuccessfulMPC()
   assert simulation.enable_hover()
-  assert not simulation.mpc_using_fallback
+  assert not simulation.mpc_using_pd
   assert simulation.controller.throttle == pytest.approx(0.60)
   assert simulation.engine_gimbal_command_radians == pytest.approx(
     raw_control[GIMBAL]
@@ -558,7 +558,7 @@ def test_async_worker_exception_rejects_result_safely() -> None:
     assert simulation._mpc_future is None
     assert simulation._mpc_future_metadata is None
     assert simulation._active_async_mpc_result is None
-    assert simulation.mpc_using_fallback
+    assert simulation.mpc_using_pd
     assert simulation.async_mpc_rejection_reason == "worker_error"
   finally:
     simulation.close()
@@ -595,7 +595,7 @@ def test_real_time_async_w_maneuver_remains_stable() -> None:
         maximum_horizontal_speed,
         float(np.linalg.norm(velocity[0:2])),
       )
-      if not simulation.mpc_using_fallback:
+      if not simulation.mpc_using_pd:
         active_steps += 1
       time.sleep(simulation.model.opt.timestep)
 
@@ -784,7 +784,7 @@ def test_direction_indicator_levels_match_gimbal_command() -> None:
   assert levels == {"W": 0.0, "A": 0.0, "S": 0.7, "D": 0.4}
 
 
-def test_controller_indicator_reports_manual_fallback_and_mpc_ownership() -> None:
+def test_controller_indicator_reports_manual_pd_and_mpc_ownership() -> None:
   window = RocketWindow.__new__(RocketWindow)
   window.simulation = RocketSimulation()
 
@@ -793,7 +793,7 @@ def test_controller_indicator_reports_manual_fallback_and_mpc_ownership() -> Non
 
   window.simulation.hover_enabled = True
   label, _ = window._controller_indicator_style()
-  assert label == "FALLBACK ACTIVE"
+  assert label == "PD ACTIVE"
 
   window.simulation.landing_phase = LandingPhase.COAST
   label, _ = window._controller_indicator_style()
@@ -801,7 +801,7 @@ def test_controller_indicator_reports_manual_fallback_and_mpc_ownership() -> Non
   window.simulation.landing_phase = LandingPhase.INACTIVE
 
   window.simulation.enable_mpc = True
-  window.simulation.mpc_using_fallback = False
+  window.simulation.mpc_using_pd = False
   window.simulation.last_mpc_result = MPCResult(
     success=True,
     control=np.zeros(4),
