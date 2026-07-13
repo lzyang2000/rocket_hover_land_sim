@@ -4,6 +4,7 @@ import pytest
 
 from rocket_landing.sim import (
   HOVER_TARGET_HORIZONTAL_LEAD_M,
+  HOVER_TARGET_SPEED_MPS,
   HOVER_TARGET_VERTICAL_LEAD_M,
   ROCKET_LANDED_COM_Z_M,
   RocketSimulation,
@@ -81,7 +82,9 @@ def test_mpc_tracks_a_wasd_style_moving_position_target() -> None:
   for step in range(2400):
     if step < 1600:
       simulation.move_hover_target(
-        np.array([2.0 * simulation.model.opt.timestep, 0.0, 0.0])
+        np.array(
+          [HOVER_TARGET_SPEED_MPS * simulation.model.opt.timestep, 0.0, 0.0]
+        )
       )
     simulation.step()
     maximum_target_lead = max(
@@ -108,9 +111,9 @@ def test_mpc_tracks_a_wasd_style_moving_position_target() -> None:
       )
 
   assert simulation.hover_target_velocity == pytest.approx(np.zeros(3))
-  assert maximum_target_lead <= 2.51
-  assert maximum_tilt_deg < 4.0
-  assert position_after_eight_seconds > 5.0
+  assert maximum_target_lead <= HOVER_TARGET_HORIZONTAL_LEAD_M + 0.01
+  assert maximum_tilt_deg < 6.0
+  assert position_after_eight_seconds > 7.0
   assert simulation.center_of_mass_position_world()[0] == pytest.approx(
     simulation.hover_target_position[0], abs=0.15
   )

@@ -96,7 +96,7 @@ Async results are rejected if they are stale, exceed position/velocity/attitude/
 
 If the solver is unavailable, infeasible, numerically invalid, or exceeds the accepted defect threshold, the simulator immediately uses a deterministic six-degree-of-freedom fallback controller. Solver failure therefore cannot remove attitude stabilization or leave stale unbounded commands active.
 
-The simulator uses scheduled MPC gimbal bounds of 5° during hover and 6° during high-altitude landing, both inside the 20° mechanical limit, and accepts solutions up to a 0.20 normalized nonlinear rollout defect. The deterministic automatic controller retains a 6° recovery envelope. Hover position commands are limited to a 2.5 m horizontal and 2 m vertical lead relative to the plant. During landing, MPC owns alignment and descent above 7 m; a deterministic terminal controller then performs the final approach under the tighter low-altitude gimbal schedule. This intentional handoff is reported separately from solver fallback.
+The simulator uses scheduled MPC gimbal bounds of 5° during hover and 6° during high-altitude landing, both inside the 20° mechanical limit, and accepts solutions up to a 0.20 normalized nonlinear rollout defect. The deterministic automatic controller retains a 6° recovery envelope. Hover position commands are limited to a 3.5 m horizontal and 2 m vertical lead relative to the plant. During landing, MPC owns alignment and descent above 7 m; a deterministic terminal controller then performs the final approach under the tighter low-altitude gimbal schedule. This intentional handoff is reported separately from solver fallback.
 
 ## 6. Physical control application
 

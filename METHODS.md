@@ -292,7 +292,7 @@ This full heading constraint fixes the former underdetermined-yaw behavior. The 
 
 ## 9. Hover and auto-land references
 
-Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD moves the horizontal target, and Up/Down moves its altitude. The target is clamped to a 2.5 m horizontal and 2 m vertical lead relative to the measured center of mass. While an input remains held, this bounded position reference advances with the rocket; it cannot run several metres ahead during the initial counter-tilt and provoke a large corrective swing. Auto-land additionally supplies a nonzero vertical target velocity so the controller tracks a deliberate descent profile rather than chasing a moving position target whose nominal velocity is incorrectly zero.
+Hover captures a target position with zero target velocity, identity attitude, and zero angular velocity. WASD advances the horizontal target at 3 m/s, and Up/Down moves its altitude at 2 m/s. The target is clamped to a 3.5 m horizontal and 2 m vertical lead relative to the measured center of mass. While an input remains held, this bounded position reference advances with the rocket; it cannot run several metres ahead during the initial counter-tilt and provoke a large corrective swing. Manual lateral-command slew is 2.4 per second rather than 1.6 per second. Auto-land additionally supplies a nonzero vertical target velocity so the controller tracks a deliberate descent profile rather than chasing a moving position target whose nominal velocity is incorrectly zero.
 
 Auto-land supplies references through two phases:
 

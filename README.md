@@ -86,7 +86,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.15`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.16`.
 
 ## Controls
 
@@ -148,11 +148,11 @@ With `--async-mpc`, SCvx becomes the slower trajectory-guidance layer and the 20
 
 In hover mode:
 
-- WASD moves the horizontal target at 2 m/s;
+- WASD moves the horizontal target at 3 m/s;
 - Up/Down moves the altitude target at 2 m/s;
 - releasing the controls leaves the target fixed and the controller settles there.
 
-WASD remains position-target driven: the position error and measured rocket velocity provide the PD/MPC feedback needed to track the moving waypoint. The controller does not falsely label the waypoint itself as travelling at 2 m/s. The horizontal target is limited to a 2.5 m lead and the altitude target to a 2 m lead relative to the rocket; holding a key keeps advancing this bounded “carrot” as the vehicle moves instead of allowing a large error to accumulate. Because the gimbaled engine is below the center of mass, the rocket still briefly counter-gimbals to create the required tilt, but hover MPC commands are limited to 5° of gimbal to suppress swinging. The automatic actuator/fallback envelope and high-altitude landing limit remain 6°.
+WASD remains position-target driven: the position error and measured rocket velocity provide the PD/MPC feedback needed to track the moving waypoint. The controller does not falsely label the waypoint itself as travelling at 3 m/s. The horizontal target is limited to a 3.5 m lead and the altitude target to a 2 m lead relative to the rocket; holding a key keeps advancing this bounded “carrot” as the vehicle moves instead of allowing a large error to accumulate. Manual WASD steering also reaches its requested gimbal direction 50% faster. Because the gimbaled engine is below the center of mass, the rocket still briefly counter-gimbals to create the required tilt, but hover MPC commands are limited to 5° of gimbal to suppress swinging. The automatic actuator/fallback envelope and high-altitude landing limit remain 6°.
 
 Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC` appears when the optional background-worker mode is selected. `6-DOF FALLBACK` means a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude controller handoff. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `FALLBACK ACTIVE`, or gray `MANUAL TVC`.
 

@@ -18,6 +18,7 @@ from rocket_landing.mpc import (
 )
 from rocket_landing.sim import (
   ASYNC_MPC_MAX_ACCEPT_AGE_S,
+  HOVER_TARGET_SPEED_MPS,
   LandingPhase,
   MAX_ROLL_CONTROL_TORQUE_NM,
   ROCKET_DIAMETER_M,
@@ -549,7 +550,7 @@ def test_real_time_async_w_maneuver_remains_stable() -> None:
           np.array(
             [
               0.0,
-              2.0 * simulation.model.opt.timestep,
+              HOVER_TARGET_SPEED_MPS * simulation.model.opt.timestep,
               0.0,
             ]
           )
