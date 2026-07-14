@@ -4,7 +4,7 @@ An interactive powered-descent rocket simulator designed to run natively on macO
 
 The MuJoCo vehicle and controller are six-degree-of-freedom. Thrust limits originate with Açıkmeşe, Carson, and Blackmore (2013); hover and landing use a receding-horizon adaptation of the successive-convexification method from Szmuk, Reynolds, and Açıkmeşe (2020).
 
-For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the optimizer specification and explicit scope boundaries, see [MPC_DESIGN.md](MPC_DESIGN.md).
+For a guided sequence of experiments, see [TEACHING_GUIDE.md](TEACHING_GUIDE.md). For equations and paper-to-code mapping, see [METHODS.md](METHODS.md). For the optimizer specification and explicit scope boundaries, see [MPC_DESIGN.md](MPC_DESIGN.md).
 
 ## What this project is for
 
