@@ -194,6 +194,7 @@ def test_thrust_arrow_tracks_engine_magnitude_and_gimbal_direction() -> None:
   assert simulation.thrust_arrow_world() is None
 
   simulation.controller.ignite()
+  simulation._update_throttle_actuator()
   minimum_arrow = simulation.thrust_arrow_world()
   assert minimum_arrow is not None
   minimum_origin, minimum_tip, minimum_fraction = minimum_arrow
@@ -206,6 +207,8 @@ def test_thrust_arrow_tracks_engine_magnitude_and_gimbal_direction() -> None:
   )
 
   simulation.controller.throttle = simulation.controller.limits.max_throttle
+  for _ in range(1_000):
+    simulation._update_throttle_actuator()
   simulation.engine_gimbal_radians[:] = (math.radians(6.0), math.radians(-3.0))
   maximum_arrow = simulation.thrust_arrow_world()
   assert maximum_arrow is not None
@@ -227,6 +230,7 @@ def test_thrust_arrow_tracks_engine_magnitude_and_gimbal_direction() -> None:
 def test_thrust_arrows_match_active_engine_count_and_bell_positions() -> None:
   simulation = RocketSimulation()
   assert simulation.start_launch_return()
+  simulation._update_throttle_actuator()
 
   ascent_arrows = simulation.thrust_arrows_world()
   assert len(ascent_arrows) == 9
@@ -253,6 +257,7 @@ def test_upper_stage_thrust_arrow_follows_its_engine_bell() -> None:
   simulation = RocketSimulation()
   assert simulation.start_launch_return()
   simulation._separate_upper_stage()
+  simulation._update_throttle_actuator()
   simulation.upper_stage_engine_active = True
   simulation.upper_stage_throttle = 1.0
   simulation.upper_stage_gimbal_radians[:] = (
@@ -399,12 +404,14 @@ def test_thrust_arrow_is_appended_only_while_engine_is_lit() -> None:
   assert window.scene.ngeom == base_geom_count
 
   window.simulation.controller.ignite()
+  window.simulation._update_throttle_actuator()
   window._append_thrust_arrow()
   assert window.scene.ngeom == base_geom_count + 1
   assert window.scene.geoms[base_geom_count].type == mujoco.mjtGeom.mjGEOM_ARROW
 
   window.simulation.reset()
   assert window.simulation.start_launch_return()
+  window.simulation._update_throttle_actuator()
   window._append_thrust_arrow()
   assert window.scene.ngeom == base_geom_count + 10
 
@@ -976,6 +983,9 @@ def test_thrust_display_returns_to_zero_when_engine_is_not_lit() -> None:
 
   window.simulation.controller.ignite()
   window.simulation.controller.throttle = 0.60
+  assert window._thrust_display_values() == (0.0, 0.0, "MANUAL")
+  for _ in range(1_000):
+    window.simulation._update_throttle_actuator()
   displayed_throttle, slider_fraction, owner = window._thrust_display_values()
   assert displayed_throttle == pytest.approx(0.60)
   assert slider_fraction == pytest.approx(0.60)
@@ -983,6 +993,31 @@ def test_thrust_display_returns_to_zero_when_engine_is_not_lit() -> None:
 
   window.simulation.controller.kill_engine()
   assert window._thrust_display_values() == (0.0, 0.0, "OFF")
+
+
+def test_throttle_actuator_interpolates_ignition_and_lit_commands() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.throttle = 0.60
+  assert simulation.controller.ignite()
+  assert simulation.applied_throttle == 0.0
+
+  simulation._update_throttle_actuator()
+  assert 0.0 < simulation.applied_throttle < 0.60
+  for _ in range(1_000):
+    simulation._update_throttle_actuator()
+  assert simulation.applied_throttle == pytest.approx(0.60, abs=1e-5)
+
+  simulation.controller.throttle = simulation.controller.limits.min_throttle
+  simulation._update_throttle_actuator()
+  assert (
+    simulation.controller.limits.min_throttle
+    < simulation.applied_throttle
+    < 0.60
+  )
+
+  assert simulation.controller.kill_engine()
+  simulation._update_throttle_actuator()
+  assert simulation.applied_throttle == 0.0
 
 
 def test_direction_indicator_levels_match_gimbal_command() -> None:

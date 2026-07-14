@@ -60,6 +60,7 @@ The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal ap
   thrust, gimbal, and roll inner loop.
 - Gimbaled main-engine thrust constrained to a 20-degree mechanical cone.
 - Paper-inspired 20–80% throttle interval with a nonzero minimum after ignition.
+- A first-order throttle actuator that smoothly interpolates ignition, relight, and positive-thrust changes; coast, kill, and cutoff remain immediate transitions to zero.
 - Fuel consumption with shared dry-stage/LOX/RP-1 center-of-mass and inertia modeling in MuJoCo and MPC.
 - Keyboard and clickable GUI flight controls.
 - DPI-aware responsive GUI sizing for Retina, standard-density, and smaller displays.
@@ -132,7 +133,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.8`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.9`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 

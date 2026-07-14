@@ -43,6 +43,7 @@ from rocket_landing.mpc import (
 
 
 THROTTLE_RATE_PER_SECOND = 0.12
+THROTTLE_ACTUATOR_TIME_CONSTANT_S = 0.35
 LATERAL_SLEW_RATE_PER_SECOND = 2.4
 ATTITUDE_KP_BODY = np.array([10_000_000.0, 10_000_000.0, 1_000_000.0])
 ATTITUDE_KD_BODY = np.array([13_000_000.0, 13_000_000.0, 350_000.0])
@@ -215,7 +216,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.8 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.9 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -487,6 +488,7 @@ class RocketSimulation:
     self.async_mpc_rejection_reason = ""
     self.engine_gimbal_command_radians = np.zeros(2, dtype=float)
     self.engine_gimbal_radians = np.zeros(2, dtype=float)
+    self.applied_throttle = 0.0
     self.roll_control_torque_command_nm = 0.0
     self.roll_control_torque_nm = 0.0
     self.coast_attitude_torque_command_body_nm = np.zeros(3, dtype=float)
@@ -534,6 +536,7 @@ class RocketSimulation:
     self.last_applied_upper_stage_mass = math.nan
     self.engine_gimbal_command_radians[:] = 0.0
     self.engine_gimbal_radians[:] = 0.0
+    self.applied_throttle = 0.0
     self.roll_control_torque_command_nm = 0.0
     self.roll_control_torque_nm = 0.0
     self.coast_attitude_torque_command_body_nm[:] = 0.0
@@ -984,7 +987,7 @@ class RocketSimulation:
     )
     mass_rate = -(
       self.controller.limits.alpha_kg_per_newton_second
-      * self.controller.thrust_magnitude_newtons()
+      * self.applied_thrust_magnitude_newtons()
     )
     return derivative_per_kg * mass_rate
 
@@ -2072,7 +2075,7 @@ class RocketSimulation:
   def _current_actuator_control(self) -> np.ndarray:
     return np.array(
       [
-        self.controller.thrust_magnitude_newtons(),
+        self.applied_thrust_magnitude_newtons(),
         self.engine_gimbal_radians[0],
         self.engine_gimbal_radians[1],
         self.roll_control_torque_nm,
@@ -2529,7 +2532,7 @@ class RocketSimulation:
       self.roll_control_torque_command_nm = 0.0
       return
     desired_torque = self._attitude_control_torque_body(desired_up)
-    thrust = self.controller.thrust_magnitude_newtons()
+    thrust = self.applied_thrust_magnitude_newtons()
     lever_arm = abs(
       float(
         ENGINE_POSITION_BODY[2]
@@ -2643,6 +2646,39 @@ class RocketSimulation:
     if abs(self.roll_control_torque_nm) < 1e-6:
       self.roll_control_torque_nm = 0.0
 
+  def applied_throttle_fraction(self) -> float:
+    """Return the lagged positive-thrust actuator state."""
+
+    if self.controller.engine_state is not EngineState.LIT:
+      return 0.0
+    return float(np.clip(self.applied_throttle, 0.0, 1.0))
+
+  def applied_thrust_magnitude_newtons(self) -> float:
+    """Return thrust after throttle-actuator interpolation."""
+
+    return (
+      self.applied_throttle_fraction()
+      * self.controller.limits.nominal_max_newtons
+    )
+
+  def _update_throttle_actuator(self) -> None:
+    if self.controller.engine_state is not EngineState.LIT:
+      self.applied_throttle = 0.0
+      return
+    target = float(
+      np.clip(
+        self.controller.throttle,
+        self.controller.limits.min_throttle,
+        self.controller.limits.max_throttle,
+      )
+    )
+    blend = 1.0 - math.exp(
+      -self.model.opt.timestep / THROTTLE_ACTUATOR_TIME_CONSTANT_S
+    )
+    self.applied_throttle += blend * (target - self.applied_throttle)
+    if abs(self.applied_throttle - target) < 1e-6:
+      self.applied_throttle = target
+
   def roll_rcs_force_pair_body(self) -> tuple[np.ndarray, np.ndarray]:
     """Return opposed body-frame forces producing the current roll moment."""
 
@@ -2703,7 +2739,7 @@ class RocketSimulation:
     rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
     if self.controller.engine_state is EngineState.LIT:
       thrust_body = (
-        self.controller.thrust_magnitude_newtons()
+        self.applied_thrust_magnitude_newtons()
         * gimbal_direction_body(self.engine_gimbal_radians)
       )
       mujoco.mj_applyFT(
@@ -2752,7 +2788,7 @@ class RocketSimulation:
     """
 
     arrows: list[tuple[np.ndarray, np.ndarray, float]] = []
-    thrust = self.controller.thrust_magnitude_newtons()
+    thrust = self.applied_thrust_magnitude_newtons()
     maximum = self.controller.limits.max_thrust_newtons
     if self.controller.engine_state is EngineState.LIT and thrust > 0.0:
       rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
@@ -2897,10 +2933,17 @@ class RocketSimulation:
   def _update_flame(self) -> None:
     lit = self.controller.engine_state is EngineState.LIT
     span = self.controller.limits.max_throttle - self.controller.limits.min_throttle
-    normalized = (
-      (self.controller.throttle - self.controller.limits.min_throttle) / span
-      if span > 0.0
-      else 0.0
+    normalized = float(
+      np.clip(
+        (
+          self.applied_throttle_fraction()
+          - self.controller.limits.min_throttle
+        ) / span
+        if span > 0.0
+        else 0.0,
+        0.0,
+        1.0,
+      )
     )
     half_length = 0.25 + 0.75 * normalized
     direction_body = gimbal_direction_body(self.engine_gimbal_radians)
@@ -2993,7 +3036,11 @@ class RocketSimulation:
       self._allocate_attitude_control(desired_up)
     self._update_engine_gimbal_actuator()
     self._update_roll_actuator()
-    self.controller.consume_fuel(self.model.opt.timestep)
+    self._update_throttle_actuator()
+    self.controller.consume_fuel(
+      self.model.opt.timestep,
+      thrust_newtons=self.applied_thrust_magnitude_newtons(),
+    )
     self._update_upper_stage_engine()
     self._update_model_mass()
     self._apply_control()
@@ -3126,8 +3173,8 @@ class RocketSimulation:
         f"ENGINE {self.controller.engine_state.name}    "
         f"{engine_cluster_line}    "
         f"{ignition_line}"
-        f"THROTTLE {self.controller.throttle * 100:5.1f}%    "
-        f"THRUST {self.controller.thrust_magnitude_newtons() / 1000:5.1f} kN"
+        f"THROTTLE {self.applied_throttle_fraction() * 100:5.1f}%    "
+        f"THRUST {self.applied_thrust_magnitude_newtons() / 1000:5.1f} kN"
       ),
       (
         f"GIMBAL {gimbal_angle:4.1f} deg    TILT {body_tilt:4.1f} deg    "
@@ -3491,7 +3538,7 @@ class RocketWindow:
     controller = self.simulation.controller
     if controller.engine_state is not EngineState.LIT:
       return 0.0, 0.0, "OFF"
-    displayed_throttle = controller.throttle
+    displayed_throttle = self.simulation.applied_throttle_fraction()
     slider_fraction = float(np.clip(displayed_throttle, 0.0, 1.0))
     owner = (
       "AUTO"

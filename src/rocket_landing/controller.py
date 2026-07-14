@@ -208,7 +208,12 @@ class RocketController:
       self.limits.pointing_half_angle_deg,
     )
 
-  def consume_fuel(self, dt: float) -> float:
+  def consume_fuel(
+    self,
+    dt: float,
+    *,
+    thrust_newtons: float | None = None,
+  ) -> float:
     """Integrate m_dot = -alpha * ||T|| and return fuel burned."""
 
     if dt <= 0.0 or self.engine_state is not EngineState.LIT:
@@ -216,7 +221,11 @@ class RocketController:
 
     requested = (
       self.limits.alpha_kg_per_newton_second
-      * self.thrust_magnitude_newtons()
+      * (
+        self.thrust_magnitude_newtons()
+        if thrust_newtons is None
+        else max(float(thrust_newtons), 0.0)
+      )
       * dt
     )
     burned = min(requested, self.fuel_mass_kg)

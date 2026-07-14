@@ -226,6 +226,8 @@ The mechanical gimbal constraint is the second-order cone
 
 MuJoCo does not apply this command instantaneously. The mechanical gimbal state follows it through a 0.08 s first-order actuator. During terminal descent the response time becomes 0.20 s and available angle is scheduled to 3 degrees below 5 m, 1.5 degrees below 2.5 m, and 0.75 degrees below 1 m. Commands smaller than 0.15 degrees are suppressed in this terminal regime. This removes rapid MPC direction reversals that previously appeared as low-altitude wobble.
 
+Positive-thrust magnitude commands also pass through a first-order actuator with a 0.35 s time constant. Fuel flow, applied force, plume/arrow dimensions, telemetry, and the GUI throttle indicator all use this lagged state. Ignition and relight spool smoothly from zero, while coast, kill, fuel-out, and touchdown cutoff still transition immediately to zero. The commanded lit throttle continues to obey the paper-inspired nonzero minimum; the physical startup transient is an explicit actuator-model exception that passes briefly through the otherwise forbidden low-thrust interval.
+
 Equivalent roll-RCS moment is bounded by
 
 \[
