@@ -49,6 +49,7 @@ The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal ap
 ## What is included
 
 - MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, moving center of mass, inertia, and contact.
+- Flat 1 km × 1 km ground plane centered on the launch/landing pad for contact and wide-area flight visualization.
 - Falcon 9 first-stage proportions: approximately 41.2 m tall, 3.66 m diameter, and 18 m deployed leg span.
 - Four horizontally deployed grid fins, four folding landing legs, and a nine-engine base whose active 9/3/1 engine cluster is visible throughout the mission.
 - Main-engine force applied at the physical engine pivot, producing coupled pitch/yaw torque.
