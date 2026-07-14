@@ -66,7 +66,7 @@ The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal ap
 - Three-dimensional hover/position hold.
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
 - Relightable high-altitude ballistic coast with a dynamic landing-burn gate.
-- Autonomous full-stack 130 km vertical boost, separation, coast, and first-stage return to the launch pad.
+- Autonomous full-stack pitch-over, gravity-turn demonstration, stage separation, boost-back, ballistic coast, and first-stage return.
 - Automatic landing takeover at 1.05 times the estimated landing-fuel reserve.
 - Deterministic 6-DOF PD control when an MPC solve is unavailable or rejected.
 - A controller-owner badge that reports launch, coast, MPC, terminal-PD,
@@ -130,7 +130,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.0`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.1`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -212,19 +212,24 @@ Synchronous mode can pause rendering and input briefly during a solve—typicall
 Press `J` or click `LAUNCH + RETURN` while the reset rocket is stationary on the pad. The mission runs
 
 ```text
-9-ENGINE BOOST → MECO + SEPARATION → BALLISTIC COAST
-→ 3-ENGINE RETURN BURN → 1-ENGINE TERMINAL BURN → COMPLETE
+9-ENGINE VERTICAL RISE + PITCH PROGRAM → SEPARATION
+→ 3-ENGINE BOOST-BACK → BALLISTIC COAST
+→ REENTRY/LANDING RELIGHT → 1-ENGINE TERMINAL BURN → COMPLETE
 ```
 
-The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 549,054 kg at liftoff, 395,700 kg of first-stage propellant, a lumped 127,754 kg upper-stage/fairing/payload stack, and nine visible Merlin-class engines. BOOST commands the nine-engine upper throttle bound while the attitude controller holds the stack upright. Rather than cutting off at a fixed clock time, guidance predicts the zero-thrust apogee
+The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 549,054 kg at liftoff, 395,700 kg of first-stage propellant, a 127,754 kg upper-stage/fairing/payload stack, and nine visible Merlin-class engines. The vehicle rises vertically through 1 km, then follows a smooth pitch program that reaches 18° from vertical by 45 km. This creates a visible downrange ballistic arc instead of the previous straight-up trajectory. Guidance still predicts the zero-thrust apogee
 
 \[
 h_a=h+\frac{\max(v_z,0)^2}{2g}
 \]
 
-and cuts off when that prediction reaches 130 km. In the deterministic vacuum regression this occurs after about 114.7 s, near 51.9 km altitude and +1,238 m/s, with about 80.2 tonnes of first-stage propellant remaining. The upper stack is then visually and dynamically jettisoned. The booster coasts to approximately 130 km, begins high-energy braking with an equivalent three-engine cluster, switches to one engine when a one-engine stopping corridor becomes feasible, and lands at the origin after about 490 s with roughly 21.9 tonnes remaining.
+and begins separation/boost-back when that prediction reaches 130 km. In the deterministic vacuum regression, separation occurs after about 115.9 s near 52.9 km altitude, 5.1 km downrange, +281 m/s horizontal speed, and +1,230 m/s vertical speed, with about 77.0 tonnes of first-stage propellant remaining.
 
-This is still a vertical suborbital teaching mission, not an orbital Falcon 9 trajectory. It now includes the full-stack mass load, first-stage propellant, nine-engine ascent thrust, and a separation mass drop, but it does not include a gravity turn, orbital downrange velocity, atmosphere, max-Q scheduling, drag, wind, entry heating, boost-back geometry, or continued upper-stage flight. Those omissions are why the vertical booster can return with much more propellant than a real mission.
+At separation, the upper stack transfers to its own free MuJoCo body, inherits the launch pose and velocity, receives a 3 m/s separation push, and continues upward ballistically. It does not disappear. Because no second-stage engine is modeled yet, it eventually falls back under gravity.
+
+The booster remains within its first ignition event while three engines perform a 75° retrograde boost-back. It then shuts down and coasts. The mission permits exactly one relight—the second and final ignition—for the combined reentry and landing burn. There are no repeated `COAST`/`DESCEND` relight cycles. In the regression, boost-back ends near 81.0 km with about 63.4 tonnes of propellant, booster apogee is about 145.7 km, and touchdown cutoff occurs after about 481 s with roughly 17.1 tonnes remaining and approximately 13 m pad-center error.
+
+This is a pitched suborbital teaching mission, not an orbital Falcon 9 trajectory. It still omits atmosphere, max-Q scheduling, drag, wind, entry heating, Earth curvature/rotation, true mission downrange velocity, and a powered second stage.
 
 ### Automatic landing
 
@@ -303,13 +308,16 @@ Mass and thrust are both 30 times the original paper-example scale, preserving t
 | Per-engine modeled vacuum thrust | 914 kN |
 | Modeled Merlin throttle interval | 57–100% |
 | Ascent/return specific impulse | 282 s / 311 s |
-| Target vertical apogee | 130 km |
+| Cutoff predicted-apogee target | 130 km |
+| Maximum ascent pitch | 18° from vertical |
+| Boost-back pitch | 75° retrograde from vertical |
+| Full-stack ignition budget | 2 total: launch and reentry/landing |
 
-The upper stack is a visible and inertially lumped load until separation; it is not a second independently simulated rigid body. The nine- and three-engine forces are applied as an equivalent centered resultant at the engine section. This captures total force, fuel flow, mass ratio, separation mass loss, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine control allocation. The 130 km mission uses explicit deterministic energy/stopping-distance guidance rather than the short-horizon landing MPC; the GUI labels this intentional owner as `RETURN ACTIVE`, not as an MPC fallback.
+The upper stack is inertially lumped into the launch vehicle until separation. At that event its visible geometry transfers to a second free rigid body that continues ballistically. The nine- and three-engine forces on the booster are still applied as equivalent centered resultants at the engine section. This captures total force, fuel flow, mass ratio, separation loss, downrange motion, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine allocation. The full-stack mission uses explicit deterministic energy/stopping-distance guidance rather than the short-horizon landing MPC; the GUI labels this intentional owner as `RETURN ACTIVE`, not as an MPC fallback.
 
 The tank intervals and RCS force level are transparent engineering assumptions, not published Block 5 specifications. A real Falcon 9 combines phase-dependent differential engine gimballing, aerodynamic grid-fin authority, and cold-gas attitude control; this single-engine landing model uses the opposed force pair as the explicit low-authority axial actuator.
 
-The 20–80% throttle interval applies to the landing lab and still comes from the paper-inspired educational model. The full-stack mission instead uses a 57–100% Merlin-class interval. Its terminal vertical law continually recomputes the thrust needed to spend the available stopping distance, and enters relightable coast whenever the requested thrust falls below the nonzero engine minimum. A real Falcon 9 still has different engine maps, relight limits, atmosphere, navigation, and mission-specific guidance.
+The 20–80% throttle interval applies to the landing lab and still comes from the paper-inspired educational model. The full-stack mission instead uses a 57–100% Merlin-class interval. Its reentry/landing ignition remains continuous through touchdown: the vertical law continually recomputes the thrust needed to spend the available stopping distance, switches from three engines to one when one-engine thrust becomes feasible, and never invents a third ignition. A real Falcon 9 still has different engine maps, relight limits, atmosphere, navigation, and mission-specific guidance.
 
 ## Is it 6-DOF?
 
@@ -439,7 +447,7 @@ Controls use world X/Y axes. The camera can rotate independently.
 | Nonlinear defect | Mismatch between the convex predicted state and an independent nonlinear rollout |
 | Warm start | Shift the previous MPC solution forward to initialize the next solve |
 | Coast | Zero main-engine thrust with the engine still armed for automatic relight |
-| Launch-return | Autonomous vertical boost, ballistic coast, and landing on the origin pad |
+| Launch-return | Autonomous pitched ascent, boost-back, ballistic coast, and booster landing near the origin pad |
 | Terminal control | Intentional low-altitude PD mode below the 7 m handoff |
 | TVC | Thrust-vector control through engine gimballing |
 

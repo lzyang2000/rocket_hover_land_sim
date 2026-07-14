@@ -61,8 +61,8 @@ def test_mjcf_compiles_and_contains_free_rocket() -> None:
   model = mujoco.MjModel.from_xml_path(str(model_path()))
   rocket_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "rocket")
   assert rocket_id > 0
-  assert model.nq == 7
-  assert model.nv == 6
+  assert model.nq == 14
+  assert model.nv == 12
 
 
 def test_launcher_defaults_to_synchronous_mpc() -> None:

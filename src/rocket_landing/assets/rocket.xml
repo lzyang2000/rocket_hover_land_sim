@@ -110,5 +110,17 @@
       <site name="roll_rcs_xp" pos="1.75 0 15.25" size="0.09" rgba="0.15 0.75 1 0.8"/>
       <site name="roll_rcs_xm" pos="-1.75 0 15.25" size="0.09" rgba="0.15 0.75 1 0.8"/>
     </body>
+
+    <!-- Hidden free-flight copy activated at stage separation. Its body frame
+         matches the first-stage body frame so the visuals transfer without a
+         pose discontinuity. It coasts ballistically after a small push. -->
+    <body name="separated_upper_stage" pos="0 0 -1000">
+      <freejoint name="upper_stage_freejoint"/>
+      <inertial pos="0 0 34.0" mass="127754" diaginertia="8900000 8900000 220000"/>
+      <geom name="separated_upper_stage_tank" type="cylinder" pos="0 0 27.15" size="1.83 6.70" material="white" rgba="0.84 0.85 0.84 0" contype="0" conaffinity="0"/>
+      <geom name="separated_upper_stage_skirt" type="cylinder" pos="0 0 20.72" size="1.86 0.30" material="soot" rgba="0.16 0.17 0.17 0" contype="0" conaffinity="0"/>
+      <geom name="separated_payload_fairing_lower" type="cylinder" pos="0 0 37.45" size="2.60 3.60" material="white" rgba="0.84 0.85 0.84 0" contype="0" conaffinity="0"/>
+      <geom name="separated_payload_fairing_upper" type="ellipsoid" pos="0 0 44.15" size="2.60 2.60 6.70" material="white" rgba="0.84 0.85 0.84 0" contype="0" conaffinity="0"/>
+    </body>
   </worldbody>
 </mujoco>

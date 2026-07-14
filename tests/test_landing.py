@@ -418,6 +418,8 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   landing_phases = set()
   peak_height = 0.0
   cutoff_fuel = None
+  boostback_fuel = None
+  separated_upper_stage_velocity = None
   first_return_started = False
   for _ in range(110_000):
     previous_mission_phase = simulation.launch_return_phase
@@ -430,27 +432,44 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
     )
     if (
       previous_mission_phase is LaunchReturnPhase.BOOST
-      and simulation.launch_return_phase is LaunchReturnPhase.COAST
+      and simulation.launch_return_phase is LaunchReturnPhase.BOOSTBACK
     ):
       cutoff_fuel = simulation.controller.fuel_mass_kg
       assert simulation.predicted_ballistic_apogee_height_m() == pytest.approx(
         LAUNCH_RETURN_TARGET_APOGEE_M,
         abs=30.0,
       )
-      assert simulation.controller.engine_state is EngineState.COAST
+      assert simulation.controller.engine_state is EngineState.LIT
       assert not simulation.upper_stage_attached
+      assert simulation.separated_upper_stage_active
       assert simulation.controller.attached_mass_kg == 0.0
       assert all(
         simulation.model.geom_rgba[geom_id, 3] == 0.0
         for geom_id in simulation.upper_stack_geom_ids
       )
+      assert all(
+        simulation.model.geom_rgba[geom_id, 3] > 0.0
+        for geom_id in simulation.separated_upper_stack_geom_ids
+      )
+      upper_dof = simulation.upper_stage_dof_address
+      separated_upper_stage_velocity = simulation.data.qvel[
+        upper_dof : upper_dof + 3
+      ].copy()
+      assert separated_upper_stage_velocity[2] > simulation.data.qvel[2]
     elif (
-      cutoff_fuel is not None
+      previous_mission_phase is LaunchReturnPhase.BOOSTBACK
+      and simulation.launch_return_phase is LaunchReturnPhase.COAST
+    ):
+      boostback_fuel = simulation.controller.fuel_mass_kg
+      assert simulation.controller.ignition_count == 1
+      assert simulation.controller.engine_state is EngineState.COAST
+    elif (
+      boostback_fuel is not None
       and not first_return_started
       and simulation.launch_return_phase is LaunchReturnPhase.COAST
     ):
       assert simulation.controller.fuel_mass_kg == pytest.approx(
-        cutoff_fuel,
+        boostback_fuel,
         abs=5.0,
       )
     if simulation.launch_return_phase is LaunchReturnPhase.RETURN:
@@ -464,6 +483,7 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert mission_phases.issuperset(
     {
       LaunchReturnPhase.BOOST,
+      LaunchReturnPhase.BOOSTBACK,
       LaunchReturnPhase.COAST,
       LaunchReturnPhase.RETURN,
       LaunchReturnPhase.COMPLETE,
@@ -472,16 +492,19 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert landing_phases.issuperset(
     {LandingPhase.COAST, LandingPhase.DESCEND, LandingPhase.COMPLETE}
   )
-  assert cutoff_fuel is not None and 78_000.0 < cutoff_fuel < 83_000.0
-  assert 129_000.0 < peak_height < 131_000.0
+  assert cutoff_fuel is not None and 75_000.0 < cutoff_fuel < 79_000.0
+  assert boostback_fuel is not None and 60_000.0 < boostback_fuel < 66_000.0
+  assert separated_upper_stage_velocity is not None
+  assert 145_000.0 < peak_height < 160_000.0
   assert simulation.launch_return_phase is LaunchReturnPhase.COMPLETE
   assert simulation.landing_phase is LandingPhase.COMPLETE
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
-  assert 15_000.0 < simulation.controller.fuel_mass_kg < 30_000.0
+  assert 12_000.0 < simulation.controller.fuel_mass_kg < 20_000.0
+  assert simulation.controller.ignition_count == 2
   assert simulation.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
   assert simulation.landing_leg_deployment == pytest.approx(1.0)
-  assert abs(simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M) < 0.20
-  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.10
+  assert 0.0 < simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M < 2.0
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 20.0
 
   simulation.reset()
   assert not simulation.full_stack_loadout

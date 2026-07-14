@@ -46,11 +46,13 @@ class RocketController:
     dry_mass_kg: float = 21_000.0,
     fuel_mass_kg: float = 9_000.0,
     attached_mass_kg: float = 0.0,
+    max_ignitions: int | None = None,
   ) -> None:
     self.limits = limits or ThrustLimits()
     self.dry_mass_kg = dry_mass_kg
     self.initial_fuel_mass_kg = fuel_mass_kg
     self.initial_attached_mass_kg = attached_mass_kg
+    self.max_ignitions = max_ignitions
     self.reset()
 
   def configure(
@@ -60,6 +62,7 @@ class RocketController:
     dry_mass_kg: float,
     fuel_mass_kg: float,
     attached_mass_kg: float = 0.0,
+    max_ignitions: int | None = None,
   ) -> None:
     """Install a new vehicle loadout and return it to an unlit state."""
 
@@ -69,6 +72,9 @@ class RocketController:
     self.dry_mass_kg = float(dry_mass_kg)
     self.initial_fuel_mass_kg = float(fuel_mass_kg)
     self.initial_attached_mass_kg = float(attached_mass_kg)
+    if max_ignitions is not None and max_ignitions < 1:
+      raise ValueError("Maximum ignitions must be positive when specified.")
+    self.max_ignitions = max_ignitions
     self.reset()
 
   def set_limits(
@@ -90,6 +96,7 @@ class RocketController:
     self.lateral_command = np.zeros(2, dtype=float)
     self.fuel_mass_kg = self.initial_fuel_mass_kg
     self.attached_mass_kg = self.initial_attached_mass_kg
+    self.ignition_count = 0
 
   @property
   def stage_mass_kg(self) -> float:
@@ -104,7 +111,10 @@ class RocketController:
 
     if self.engine_state is not EngineState.OFF or self.fuel_mass_kg <= 0.0:
       return False
+    if self.max_ignitions is not None and self.ignition_count >= self.max_ignitions:
+      return False
     self.engine_state = EngineState.LIT
+    self.ignition_count += 1
     self.throttle = float(
       np.clip(self.throttle, self.limits.min_throttle, self.limits.max_throttle)
     )
@@ -123,12 +133,15 @@ class RocketController:
 
     if self.engine_state is not EngineState.COAST or self.fuel_mass_kg <= 0.0:
       return False
+    if self.max_ignitions is not None and self.ignition_count >= self.max_ignitions:
+      return False
     if throttle is not None:
       self.throttle = float(throttle)
     self.throttle = float(
       np.clip(self.throttle, self.limits.min_throttle, self.limits.max_throttle)
     )
     self.engine_state = EngineState.LIT
+    self.ignition_count += 1
     return True
 
   def kill_engine(self) -> bool:

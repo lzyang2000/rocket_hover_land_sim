@@ -67,6 +67,18 @@ def test_attached_stack_mass_is_inert_and_jettisonable() -> None:
   assert controller.wet_mass_kg == pytest_approx(controller.stage_mass_kg)
 
 
+def test_engine_can_enforce_a_two_ignition_mission_budget() -> None:
+  controller = RocketController(max_ignitions=2)
+  assert controller.ignite()
+  assert controller.ignition_count == 1
+  assert controller.begin_coast()
+  assert controller.relight()
+  assert controller.ignition_count == 2
+  assert controller.begin_coast()
+  assert not controller.relight()
+  assert controller.engine_state is EngineState.COAST
+
+
 def test_engine_kill_jumps_directly_to_zero_and_requires_reset() -> None:
   controller = RocketController()
   controller.ignite()

@@ -151,7 +151,7 @@ The autonomous launch-return button replaces that teaching loadout with an appro
 - three-engine and one-engine return clusters using 914 kN per engine;
 - 282 s ascent and 311 s return specific impulse assumptions.
 
-The upper stack is combined with the first-stage mass properties through the parallel-axis theorem until separation. At separation its mass and visuals are removed, while the first-stage free-body pose and velocity remain continuous. The upper stage is not propagated as a second MuJoCo body.
+The upper stack is combined with the first-stage mass properties through the parallel-axis theorem until separation. At separation its mass is removed from the booster, while its geometry transfers to a second free MuJoCo body. That body inherits the launch pose, angular rate, and translational velocity plus a 3 m/s axial separation push, so it continues upward ballistically instead of disappearing. It has no modeled second-stage propulsion.
 
 The mass equation is
 
@@ -381,25 +381,35 @@ Auto-land supplies references through three powered/ballistic phases:
 
 ### Launch-return mission
 
-The autonomous launch-return mode is a vertical full-stack boost–separation–landing experiment layered above the normal landing state machine. During BOOST, all nine modeled engines run at their upper bound and attitude control holds the stack upright. At each physics step guidance predicts the zero-thrust apogee
+The autonomous launch-return mode is a pitched full-stack boost–separation–landing experiment layered above the normal landing state machine. During BOOST, all nine modeled engines run at their upper bound. The first kilometre remains vertical. Between 1 km and 45 km, a cubic smooth-step schedule increases pitch from 0° to 18° toward world $+X$:
+
+\[
+s=\operatorname{clip}\left(\frac{h-1000}{45000-1000},0,1\right),
+\qquad
+\theta=18^\circ s^2(3-2s).
+\]
+
+This creates horizontal velocity and a genuine downrange ballistic arc. At each physics step guidance also predicts the zero-thrust apogee
 
 \[
 h_a=h+\frac{\max(v_z,0)^2}{2g}.
 \]
 
-When $h_a$ reaches the 130 km target—or first-stage propellant reaches the 70 tonne safety floor—the ascent engines cut off. The attached 127,754 kg upper stack is jettisoned, the first stage enters relightable COAST, and the return engine model changes to a three-engine cluster. In the deterministic vacuum regression, cutoff occurs near 51.9 km and +1,238 m/s with about 80.2 tonnes of propellant remaining.
+When $h_a$ reaches the 130 km target—or first-stage propellant reaches the safety floor—the 127,754 kg upper stack separates into its free-flight body and the booster changes to a three-engine cluster. In the deterministic vacuum regression, this occurs near 52.9 km and 5.1 km downrange with approximately $(v_x,v_z)=(281,1230)$ m/s and 77.0 tonnes of propellant.
 
-The booster coasts to about 130 km. A three-engine cluster handles the first high-energy braking segment. Guidance switches to one engine only when both a mass threshold and a one-engine stopping-distance calculation show that the remaining altitude can absorb the current downward velocity. If an early burn over-brakes while substantial altitude remains, the engine returns to the relightable coast state instead of wasting minimum thrust.
+The booster does not immediately coast. It slews toward a 75° retrograde boost-back attitude. Minimum throttle is used during the large attitude change, then maximum throttle shifts the predicted vacuum impact point back toward the launch site. The launch ignition remains continuous through this maneuver. When the compensated impact target is reached, the engine shuts down and the booster enters ballistic coast. An equivalent bounded pitch/yaw cold-gas torque brings the stage upright during coast.
 
-Below 200 m, the full-stack return uses a vertical suicide-burn law. For downward speed $v$, height $h$, and target touchdown speed $v_t$, it requests the net upward deceleration
+The engine model gives the full-stack mission exactly two ignition events: launch and one combined reentry/landing relight. Consequently, the high-altitude state machine cannot chatter between coast and descend. Once ignition count two is reached, re-coast is forbidden and the engine remains lit until touchdown cutoff.
+
+During the continuous reentry/landing burn, the vertical suicide-burn law uses downward speed $v$, height $h$, and target touchdown speed $v_t$ to request
 
 \[
-a_s=1.03\max\left(\frac{v^2-v_t^2}{2\max(h,0.2)},0\right),
+a_s=1.03\max\left(\frac{v^2-v_t^2}{2\max(h-1,0.2)},0\right),
 \]
 
-then commands $T=m(g+a_s)$ subject to the active engine bounds. If this drops below minimum thrust, the engine enters relightable coast; it does not pretend that a forbidden low thrust is available. The deterministic regression lands after about 490 s with approximately 21.9 tonnes of propellant remaining.
+then commands $T=m(g+a_s)$ subject to the active engine bounds. Three engines are retained until this required thrust fits inside the one-engine interval; the controller then switches once to the center engine. Horizontal acceleration is generated from a finite-time pad-intercept law while respecting the 6° return gimbal limit. The deterministic regression reaches engine cutoff after about 481 s with approximately 17.1 tonnes of propellant remaining.
 
-This is still intentionally vertical and suborbital. A realistic launch would need atmospheric drag, max-Q and engine schedules, a gravity turn, navigation over a rotating Earth, continued upper-stage flight, and a separate downrange boost-back/entry geometry.
+This remains suborbital and simplified. A realistic launch would need atmospheric drag, max-Q and engine schedules, a much larger gravity turn toward orbital velocity, navigation over a rotating/curved Earth, continued upper-stage propulsion, and mission-specific boost-back/entry geometry.
 
 ### Align
 

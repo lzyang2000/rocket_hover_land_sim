@@ -336,6 +336,34 @@ This is a design exercise; the current simulator is a vacuum model.
 3. How should controller gains change between thin air, max-Q, and terminal descent?
 4. What failure criterion should replace a single nominal landing test?
 
+## Lab 8: Pitch-over, separation, and boost-back
+
+### Question
+
+Why does a launch vehicle pitch away from vertical, and how can the booster still return to the launch site?
+
+### Procedure
+
+1. Press `J` from reset and watch the first kilometre remain vertical.
+2. Observe pitch increase smoothly toward 18° and note the growing downrange position and horizontal velocity.
+3. At separation, watch the upper stack become an independent rigid body and continue upward with a small separation push.
+4. Observe `BOOSTBACK ACTIVE`: the booster slews retrograde and moves the predicted ballistic impact point toward the pad.
+5. Count engine ignitions in telemetry. The full mission permits exactly two: launch and the combined reentry/landing burn.
+
+### Expected observations
+
+- Pitch creates horizontal velocity, so ballistic flight becomes an arc rather than a vertical line.
+- The separated upper body preserves position, attitude, velocity, and angular rate; it does not disappear.
+- Boost-back changes the predicted impact point before the long engine-off coast.
+- High-altitude `COAST`/`DESCEND` chatter is impossible after the second ignition because no third relight is available.
+- This remains a suborbital vacuum demonstration, not an orbital gravity turn or powered upper-stage simulation.
+
+### Check your understanding
+
+1. Why does the booster apogee differ from the 130 km cutoff prediction after boost-back thrust is applied?
+2. Why must horizontal pad interception account for the longer flight time created by powered vertical braking?
+3. What additional state and constraints would a true ascent-and-entry trajectory optimizer require?
+
 ## Assessment prompts
 
 Use these prompts for a report, oral examination, or project review:
