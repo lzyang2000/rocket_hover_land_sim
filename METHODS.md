@@ -125,6 +125,8 @@ MuJoCo remains the authoritative plant. The MPC model is propagated with RK4 ove
 
 The world contact surface is a flat 1 km × 1 km MuJoCo plane centered on the origin pad, implemented with 500 m half-extents in `rocket.xml`. It provides collision support and visual context only; it does not introduce terrain elevation, Earth curvature, or additional aerodynamic effects.
 
+The 72 m launch tower is also fixed world geometry. Its columns, platforms, braces, and service arms have both contact masks disabled, so the tower provides scale and launch-pad context without applying forces to either stage.
+
 The central teaching point is that translation and rotation are coupled. Tilting thrust creates horizontal acceleration, but because the engine is below the COM it also creates angular acceleration. A controller cannot command lateral motion independently of attitude and still represent the rigid-body physics.
 
 ## 3. Falcon 9-like scale and mass depletion

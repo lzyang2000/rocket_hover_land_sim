@@ -85,6 +85,24 @@ def test_fairing_ellipsoid_meets_lower_cylinder_at_its_equator() -> None:
     assert model.geom_pos[upper_id, 2] == pytest.approx(lower_top)
 
 
+def test_launch_tower_is_left_of_rocket_and_visual_only() -> None:
+  model = mujoco.MjModel.from_xml_path(str(model_path()))
+  tower_body_id = mujoco.mj_name2id(
+    model, mujoco.mjtObj.mjOBJ_BODY, "launch_tower"
+  )
+  assert model.body_pos[tower_body_id, 0] < 0.0
+
+  for name in (
+    "launch_tower_base",
+    "launch_tower_column_xp_yp",
+    "launch_tower_service_arm_high",
+  ):
+    geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+    assert geom_id >= 0
+    assert model.geom_contype[geom_id] == 0
+    assert model.geom_conaffinity[geom_id] == 0
+
+
 def test_launcher_defaults_to_synchronous_mpc() -> None:
   parser = build_argument_parser()
 

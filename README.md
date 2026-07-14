@@ -50,6 +50,7 @@ The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal ap
 
 - MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, moving center of mass, inertia, and contact.
 - Flat 1 km × 1 km ground plane centered on the launch/landing pad for contact and wide-area flight visualization.
+- A 72 m visual-only steel launch tower with three service arms, positioned to the left of the rocket.
 - Falcon 9 first-stage proportions: approximately 41.2 m tall, 3.66 m diameter, and 18 m deployed leg span.
 - Four horizontally deployed grid fins, four folding landing legs, and a nine-engine base whose active 9/3/1 engine cluster is visible throughout the mission.
 - Main-engine force applied at the physical engine pivot, producing coupled pitch/yaw torque.
@@ -131,7 +132,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.7`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.8`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 

@@ -24,6 +24,8 @@
     <material name="leg" rgba="0.72 0.73 0.71 1" metallic="0.72" roughness="0.28"/>
     <material name="engine" rgba="0.20 0.21 0.21 1" metallic="0.88" roughness="0.22"/>
     <material name="pad" rgba="0.18 0.20 0.22 1" metallic="0.4" roughness="0.5"/>
+    <material name="tower_steel" rgba="0.31 0.34 0.37 1" metallic="0.72" roughness="0.36"/>
+    <material name="tower_arm" rgba="0.58 0.40 0.22 1" metallic="0.52" roughness="0.42"/>
   </asset>
 
   <worldbody>
@@ -36,6 +38,30 @@
     <geom name="target_inner" type="cylinder" pos="0 0 0.184" size="7.4 0.012" rgba="0.14 0.16 0.18 1" contype="0" conaffinity="0"/>
     <!-- Invisible launch support; disabled permanently once flight begins. -->
     <geom name="launch_mount" type="cylinder" pos="0 0 0.61" size="1.50 0.61" rgba="0 0 0 0"/>
+
+    <!-- Visual-only launch tower on world -X, left of the rocket. -->
+    <body name="launch_tower" pos="-11 0 0">
+      <geom name="launch_tower_base" type="box" pos="0 0 0.35" size="2.4 2.4 0.35" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_column_xm_ym" type="box" pos="-1.4 -1.4 36" size="0.24 0.24 36" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_column_xm_yp" type="box" pos="-1.4 1.4 36" size="0.24 0.24 36" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_column_xp_ym" type="box" pos="1.4 -1.4 36" size="0.24 0.24 36" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_column_xp_yp" type="box" pos="1.4 1.4 36" size="0.24 0.24 36" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_platform_06" type="box" pos="0 0 6" size="1.75 1.75 0.14" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_platform_18" type="box" pos="0 0 18" size="1.75 1.75 0.14" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_platform_30" type="box" pos="0 0 30" size="1.75 1.75 0.14" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_platform_42" type="box" pos="0 0 42" size="1.75 1.75 0.14" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_platform_54" type="box" pos="0 0 54" size="1.75 1.75 0.14" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_platform_66" type="box" pos="0 0 66" size="1.75 1.75 0.14" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_brace_low_a" type="capsule" fromto="1.4 -1.4 6 1.4 1.4 18" size="0.12" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_brace_low_b" type="capsule" fromto="1.4 1.4 6 1.4 -1.4 18" size="0.12" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_brace_mid_a" type="capsule" fromto="1.4 -1.4 30 1.4 1.4 42" size="0.12" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_brace_mid_b" type="capsule" fromto="1.4 1.4 30 1.4 -1.4 42" size="0.12" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_brace_high_a" type="capsule" fromto="1.4 -1.4 54 1.4 1.4 66" size="0.12" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_brace_high_b" type="capsule" fromto="1.4 1.4 54 1.4 -1.4 66" size="0.12" material="tower_steel" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_service_arm_low" type="box" pos="5.0 0 21" size="3.6 0.32 0.24" material="tower_arm" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_service_arm_mid" type="box" pos="5.0 0 43" size="3.6 0.32 0.24" material="tower_arm" contype="0" conaffinity="0"/>
+      <geom name="launch_tower_service_arm_high" type="box" pos="5.0 0 61" size="3.6 0.32 0.24" material="tower_arm" contype="0" conaffinity="0"/>
+    </body>
 
     <!--
       Body coordinates approximate a Falcon 9 first stage: 41.2 m overall
