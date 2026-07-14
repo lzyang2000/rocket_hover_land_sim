@@ -130,7 +130,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.4`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.5`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -227,7 +227,7 @@ and begins separation/boost-back when that prediction reaches 130 km. In the det
 
 At separation, the second stage transfers to its own free MuJoCo body, inherits the launch pose and velocity, and receives a 3 m/s separation push. One second later its modeled 981 kN Merlin Vacuum-class engine ignites. The stage carries 107,500 kg of modeled propellant at 348 s specific impulse, loses mass as it burns, and receives continuous axial acceleration rather than disappearing or simply falling away. Its initial thrust-to-weight ratio is about 0.90, so while the teaching trajectory remains steep the engine first reduces the rate of gravitational deceleration; as propellant burns, thrust-to-weight rises above one.
 
-The booster remains within its first ignition event while three engines perform a 75° retrograde boost-back. It then shuts down and coasts. The mission permits exactly one relight—the second and final ignition—for the combined reentry and landing burn. There are no repeated `COAST`/`DESCEND` relight cycles. In the regression, boost-back ends near 82.3 km with about 77.2 tonnes of propellant, booster apogee is about 144.8 km, and touchdown cutoff occurs after about 500 s with roughly 20.7 tonnes remaining, 0.01 m pad-center error, 0.25 m/s lateral speed, and less than 0.5° tilt.
+The booster remains within its first ignition event while three engines perform a 75° retrograde boost-back. It then shuts down and coasts. The mission permits exactly one relight—the second and final ignition—for the combined reentry and landing burn. There are no repeated `COAST`/`DESCEND` relight cycles. The three-engine entry gate uses a larger stopping-distance margin than the ordinary landing lab, moving ignition from the former roughly 61 km / 1,280 m/s condition into a regression window of 68–78 km and 1,120–1,240 m/s downward. The one-engine terminal gate remains independently tuned for touchdown. This earlier continuous burn trades about 4.2 tonnes of reserve for lower entry speed, leaving roughly 16.5 tonnes at landing in the deterministic vacuum run.
 
 This is a pitched suborbital teaching mission, not an orbital Falcon 9 trajectory. It still omits atmosphere, max-Q scheduling, drag, wind, entry heating, Earth curvature/rotation, true mission downrange velocity, and orbital second-stage guidance.
 

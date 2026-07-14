@@ -424,6 +424,8 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   separated_upper_stage_velocity = None
   upper_stage_engine_seen = False
   first_return_started = False
+  entry_burn_height = None
+  entry_burn_vertical_speed = None
   for _ in range(110_000):
     previous_mission_phase = simulation.launch_return_phase
     simulation.step()
@@ -481,6 +483,13 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
         abs=5.0,
       )
     if simulation.launch_return_phase is LaunchReturnPhase.RETURN:
+      if not first_return_started:
+        entry_burn_height = float(
+          simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M
+        )
+        entry_burn_vertical_speed = float(
+          simulation.center_of_mass_velocity_world()[2]
+        )
       first_return_started = True
     if simulation.launch_return_phase in (
       LaunchReturnPhase.COMPLETE,
@@ -504,11 +513,16 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert boostback_fuel is not None and 75_000.0 < boostback_fuel < 80_000.0
   assert separated_upper_stage_velocity is not None
   assert upper_stage_engine_seen
+  assert entry_burn_height is not None and 68_000.0 < entry_burn_height < 78_000.0
+  assert (
+    entry_burn_vertical_speed is not None
+    and -1_240.0 < entry_burn_vertical_speed < -1_120.0
+  )
   assert 140_000.0 < peak_height < 150_000.0
   assert simulation.launch_return_phase is LaunchReturnPhase.COMPLETE
   assert simulation.landing_phase is LandingPhase.COMPLETE
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
-  assert 18_000.0 < simulation.controller.fuel_mass_kg < 23_000.0
+  assert 14_000.0 < simulation.controller.fuel_mass_kg < 19_000.0
   assert simulation.controller.ignition_count == 2
   assert simulation.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
   assert simulation.landing_leg_deployment == pytest.approx(1.0)

@@ -145,6 +145,7 @@ FALCON9_RETURN_RECOAST_SPEED_RATIO = 0.72
 FALCON9_RETURN_MIN_POWERED_SEGMENT_S = 3.0
 FALCON9_RETURN_MIN_COAST_SEGMENT_S = 3.0
 FALCON9_RETURN_COAST_SAFETY_GATE_FACTOR = 0.85
+FALCON9_ENTRY_BURN_STOPPING_DISTANCE_FACTOR = 1.7
 FALCON9_GRAVITY_TURN_START_HEIGHT_M = 1_000.0
 FALCON9_GRAVITY_TURN_END_HEIGHT_M = 45_000.0
 FALCON9_GRAVITY_TURN_MAX_PITCH_DEG = 18.0
@@ -208,7 +209,7 @@ THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.4 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.5 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -1556,14 +1557,20 @@ class RocketSimulation:
       speed * speed - target_speed_squared,
       0.0,
     ) / (2.0 * net_braking_acceleration)
-    full_stack_terminal = (
+    full_stack_return = (
       self.full_stack_loadout
       and not self.upper_stage_attached
+    )
+    full_stack_terminal = (
+      full_stack_return
       and self.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
     )
-    stopping_factor = (
-      1.08 if full_stack_terminal else COAST_STOPPING_DISTANCE_FACTOR
-    )
+    if full_stack_terminal:
+      stopping_factor = 1.08
+    elif full_stack_return:
+      stopping_factor = FALCON9_ENTRY_BURN_STOPPING_DISTANCE_FACTOR
+    else:
+      stopping_factor = COAST_STOPPING_DISTANCE_FACTOR
     ignition_delay = 0.20 if full_stack_terminal else COAST_IGNITION_DELAY_S
     fixed_margin = 1.0 if full_stack_terminal else COAST_FIXED_BURN_MARGIN_M
     ignition_delay_distance = (
