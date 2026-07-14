@@ -187,6 +187,10 @@ ASYNC_MPC_HOVER_VELOCITY_BLEND = 1.0
 ASYNC_MPC_LANDING_VELOCITY_BLEND = 1.0
 ASYNC_MPC_HOVER_POSITION_GAIN_SCALE = 1.50
 ASYNC_MPC_LANDING_POSITION_GAIN_SCALE = 1.0
+ASYNC_MPC_LANDING_NO_CLIMB_HEIGHT_M = 200.0
+ASYNC_MPC_LANDING_DESCENT_RECOVERY_GAIN = 0.50
+ASYNC_MPC_LANDING_MIN_DESCENT_RECOVERY_MPS2 = 0.50
+ASYNC_MPC_LANDING_MAX_DESCENT_RECOVERY_MPS2 = 3.0
 HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
 HOVER_VELOCITY_KD = np.array([0.70, 0.70, 1.80])
 HOVER_TARGET_SPEED_MPS = 3.0
@@ -223,7 +227,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.11 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.12 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -1994,6 +1998,28 @@ class RocketSimulation:
       + position_gain_scale * HOVER_POSITION_KP * position_error
       + HOVER_VELOCITY_KD * velocity_error
     )
+    body_height = max(
+      float(self.data.qpos[2] - LANDING_PAD_POSITION[2]),
+      0.0,
+    )
+    if (
+      self.asynchronous_mpc
+      and self.landing_phase is LandingPhase.DESCEND
+      and MPC_TERMINAL_HANDOFF_HEIGHT_M < body_height
+      <= ASYNC_MPC_LANDING_NO_CLIMB_HEIGHT_M
+      and reference_velocity[2] < 0.0
+      and velocity[2] >= reference_velocity[2]
+    ):
+      excess_vertical_speed = float(velocity[2] - reference_velocity[2])
+      recovery_acceleration = min(
+        ASYNC_MPC_LANDING_MAX_DESCENT_RECOVERY_MPS2,
+        ASYNC_MPC_LANDING_MIN_DESCENT_RECOVERY_MPS2
+        + ASYNC_MPC_LANDING_DESCENT_RECOVERY_GAIN * excess_vertical_speed,
+      )
+      desired_acceleration[2] = min(
+        float(desired_acceleration[2]),
+        -recovery_acceleration,
+      )
     required_force = self.controller.wet_mass_kg * (
       desired_acceleration - self.model.opt.gravity
     )
@@ -2001,10 +2027,6 @@ class RocketSimulation:
       self.full_stack_loadout
       and not self.upper_stage_attached
       and self.landing_phase is LandingPhase.DESCEND
-    )
-    body_height = max(
-      float(self.data.qpos[2] - LANDING_PAD_POSITION[2]),
-      0.0,
     )
     if full_stack_return_burn:
       downward_speed = max(-float(self.data.qvel[2]), 0.0)

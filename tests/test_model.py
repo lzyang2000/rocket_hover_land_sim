@@ -732,6 +732,38 @@ def test_async_landing_cannot_use_stale_upward_reference_to_climb() -> None:
   assert captured["feedforward_acceleration"][2] <= 0.0
 
 
+def test_async_landing_inner_loop_commands_downward_recovery_near_100m() -> None:
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+  try:
+    simulation.controller.ignite()
+    simulation.hover_enabled = True
+    simulation.landing_phase = LandingPhase.DESCEND
+    simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 100.0
+    simulation.data.qvel[2] = -5.0
+    mujoco.mj_forward(simulation.model, simulation.data)
+    current_position = simulation.center_of_mass_position_world()
+    simulation.hover_target_position = current_position.copy()
+    simulation.hover_target_position[2] += 5.0
+    simulation.hover_target_velocity[:] = (0.0, 0.0, -12.0)
+
+    simulation._pd_hover_guidance(
+      target_position=simulation.hover_target_position,
+      target_velocity=simulation.hover_target_velocity,
+      feedforward_acceleration=np.array([0.0, 0.0, 3.0]),
+    )
+
+    commanded_thrust = (
+      simulation.controller.throttle
+      * simulation.controller.limits.nominal_max_newtons
+    )
+    weight = simulation.controller.wet_mass_kg * abs(
+      float(simulation.model.opt.gravity[2])
+    )
+    assert commanded_thrust < weight
+  finally:
+    simulation.close()
+
+
 def test_async_inner_loop_keeps_all_actuator_commands_bounded() -> None:
   simulation = RocketSimulation()
   simulation.controller.ignite()
