@@ -30,7 +30,7 @@
     <light pos="-45 -35 85" dir="0.5 0.4 -1" directional="true" diffuse="0.9 0.86 0.78" castshadow="true"/>
     <light pos="55 30 55" dir="-0.8 -0.4 -1" directional="true" diffuse="0.26 0.34 0.5"/>
 
-    <geom name="ground" type="plane" size="300 300 0.1" material="ground_mat"/>
+    <geom name="ground" type="plane" size="500 500 0.1" material="ground_mat"/>
     <geom name="landing_pad" type="cylinder" pos="0 0 0.08" size="15 0.08" material="pad"/>
     <geom name="target_outer" type="cylinder" pos="0 0 0.172" size="9.0 0.01" rgba="0.88 0.52 0.12 1" contype="0" conaffinity="0"/>
     <geom name="target_inner" type="cylinder" pos="0 0 0.184" size="7.4 0.012" rgba="0.14 0.16 0.18 1" contype="0" conaffinity="0"/>

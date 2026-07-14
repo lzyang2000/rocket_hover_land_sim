@@ -209,7 +209,7 @@ THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.5 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.6 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
