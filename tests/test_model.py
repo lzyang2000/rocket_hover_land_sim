@@ -676,6 +676,62 @@ def test_async_inner_loop_shifts_reference_to_latest_target() -> None:
   )
 
 
+def test_async_landing_cannot_use_stale_upward_reference_to_climb() -> None:
+  simulation = RocketSimulation()
+  simulation.controller.ignite()
+  simulation.hover_enabled = True
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 100.0
+  simulation.data.qvel[2] = -5.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  simulation.hover_target_position[2] -= 1.0
+  simulation.hover_target_velocity[:] = (0.0, 0.0, -12.0)
+
+  result = _successful_prediction(simulation)
+  simulation._active_async_mpc_result = result
+  simulation._active_async_mpc_request_time = float(simulation.data.time)
+  simulation._active_async_mpc_target_position = (
+    simulation.hover_target_position.copy()
+  )
+  simulation._active_async_mpc_target_velocity = (
+    simulation.hover_target_velocity.copy()
+  )
+  current_state = simulation._mpc_state()
+  stale_future_state = current_state.copy()
+  stale_future_state[POSITION][2] = simulation.hover_target_position[2] + 4.0
+  stale_future_state[VELOCITY][2] = -5.0
+  sample_count = 0
+
+  def sample_prediction(*_args):
+    nonlocal sample_count
+    sample_count += 1
+    if sample_count == 1:
+      return current_state.copy(), np.zeros(3)
+    return stale_future_state.copy(), np.array([0.0, 0.0, 3.0])
+
+  captured: dict[str, np.ndarray] = {}
+
+  def capture_guidance(**kwargs) -> None:
+    captured.update(
+      {
+        key: np.asarray(value, dtype=float).copy()
+        for key, value in kwargs.items()
+      }
+    )
+
+  simulation._sample_mpc_prediction = sample_prediction
+  simulation._pd_hover_guidance = capture_guidance
+  simulation._allocate_attitude_control = lambda *_args, **_kwargs: None
+
+  assert simulation._track_async_mpc_trajectory()
+  assert captured["target_position"][2] == pytest.approx(
+    simulation.hover_target_position[2]
+  )
+  assert captured["target_velocity"][2] == pytest.approx(-12.0)
+  assert captured["feedforward_acceleration"][2] <= 0.0
+
+
 def test_async_inner_loop_keeps_all_actuator_commands_bounded() -> None:
   simulation = RocketSimulation()
   simulation.controller.ignite()

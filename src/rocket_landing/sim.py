@@ -223,7 +223,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.10 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.11 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -2304,6 +2304,10 @@ class RocketSimulation:
     reference_position += target_blend * (
       self.hover_target_position - reference_position
     )
+    if self.landing_active:
+      # A moving descent target can shift several metres while an async solve
+      # is in flight. Never retain the older trajectory's higher Z reference.
+      reference_position[2] = self.hover_target_position[2]
     reference_position[2] = max(
       reference_position[2], self._mpc_config.minimum_com_height_m
     )
@@ -2326,6 +2330,16 @@ class RocketSimulation:
     # desired body direction. Vertical feed-forward does not have this
     # non-minimum-phase ambiguity.
     feedforward_acceleration[0:2] = 0.0
+    if (
+      self.landing_active
+      and self.center_of_mass_velocity_world()[2] >= reference_velocity[2]
+    ):
+      # The stage is already descending more slowly than requested. A stale
+      # positive braking term would reverse it into a climb near the ground.
+      feedforward_acceleration[2] = min(
+        float(feedforward_acceleration[2]),
+        0.0,
+      )
     self._pd_hover_guidance(
       target_position=reference_position,
       target_velocity=reference_velocity,

@@ -133,7 +133,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.10`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.11`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
