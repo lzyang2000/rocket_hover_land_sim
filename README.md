@@ -130,7 +130,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.3`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.4`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -177,7 +177,7 @@ When the engine is off, killed, fuel-depleted, or shut down after landing, the s
 
 Each active engine receives a colored arrow anchored at its physical bell location. The full-stack ascent therefore shows nine arrows, boost-back and reentry show the center engine plus two opposed outer engines, and terminal landing shows the center arrow alone. The independently moving upper stage receives its own arrow after its engine ignites.
 
-All booster arrows follow the actual lagged gimbal state. Their length and thickness scale with applied throttle, while color moves from orange toward cyan as thrust increases. They disappear immediately when the corresponding engine cluster is off or killed. Each arrow is deliberately drawn outward through the visible plume, so it shows nozzle/exhaust direction; the reaction force applied to the rocket points in the opposite direction.
+All booster arrows follow the actual lagged gimbal state. Their length and thickness scale with applied throttle, while their color remains the same flame orange at every thrust level. They disappear immediately when the corresponding engine cluster is off or killed. Each arrow is deliberately drawn outward through the visible plume, so it shows nozzle/exhaust direction; the reaction force applied to the rocket points in the opposite direction.
 
 ## Operating modes
 
@@ -217,19 +217,19 @@ Press `J` or click `LAUNCH + RETURN` while the reset rocket is stationary on the
 → REENTRY/LANDING RELIGHT → 1-ENGINE TERMINAL BURN → COMPLETE
 ```
 
-The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 549,054 kg at liftoff, 395,700 kg of first-stage propellant, a 127,754 kg upper-stage/fairing/payload stack, and nine visible Merlin-class engines. The vehicle rises vertically through 1 km, then follows a smooth pitch program that reaches 18° from vertical by 45 km. This creates a visible downrange ballistic arc instead of the previous straight-up trajectory. Guidance still predicts the zero-thrust apogee
+The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 544,600 kg at liftoff, a 433,100 kg first stage (25,600 kg dry plus 407,500 kg propellant), a 111,500 kg second stage (4,000 kg dry plus 107,500 kg propellant), and nine visible Merlin-class first-stage engines. The fairing remains part of the visual teaching model but is not assigned additional payload mass beyond the stated second-stage wet mass. The vehicle rises vertically through 1 km, then follows a smooth pitch program that reaches 18° from vertical by 45 km. This creates a visible downrange ballistic arc instead of the previous straight-up trajectory. Guidance still predicts the zero-thrust apogee
 
 \[
 h_a=h+\frac{\max(v_z,0)^2}{2g}
 \]
 
-and begins separation/boost-back when that prediction reaches 130 km. In the deterministic vacuum regression, separation occurs after about 115.9 s near 52.9 km altitude, 5.1 km downrange, +281 m/s horizontal speed, and +1,230 m/s vertical speed, with about 77.0 tonnes of first-stage propellant remaining.
+and begins separation/boost-back when that prediction reaches 130 km. In the deterministic vacuum regression, separation occurs after about 114.6 s near 52.7 km altitude, 5.0 km downrange, +278 m/s horizontal speed, and +1,232 m/s vertical speed, with about 92.2 tonnes of first-stage propellant remaining.
 
-At separation, the upper stack transfers to its own free MuJoCo body, inherits the launch pose and velocity, and receives a 3 m/s separation push. One second later its modeled 981 kN Merlin Vacuum-class engine ignites. The upper stage carries 92,670 kg of modeled propellant at 348 s specific impulse, loses mass as it burns, and continues powered ascent rather than disappearing or simply falling away.
+At separation, the second stage transfers to its own free MuJoCo body, inherits the launch pose and velocity, and receives a 3 m/s separation push. One second later its modeled 981 kN Merlin Vacuum-class engine ignites. The stage carries 107,500 kg of modeled propellant at 348 s specific impulse, loses mass as it burns, and receives continuous axial acceleration rather than disappearing or simply falling away. Its initial thrust-to-weight ratio is about 0.90, so while the teaching trajectory remains steep the engine first reduces the rate of gravitational deceleration; as propellant burns, thrust-to-weight rises above one.
 
-The booster remains within its first ignition event while three engines perform a 75° retrograde boost-back. It then shuts down and coasts. The mission permits exactly one relight—the second and final ignition—for the combined reentry and landing burn. There are no repeated `COAST`/`DESCEND` relight cycles. In the regression, boost-back ends near 81.0 km with about 63.4 tonnes of propellant, booster apogee is about 145.7 km, and touchdown cutoff occurs after about 488 s with roughly 16.3 tonnes remaining, 0.16 m pad-center error, 0.38 m/s lateral speed, and less than 0.5° tilt.
+The booster remains within its first ignition event while three engines perform a 75° retrograde boost-back. It then shuts down and coasts. The mission permits exactly one relight—the second and final ignition—for the combined reentry and landing burn. There are no repeated `COAST`/`DESCEND` relight cycles. In the regression, boost-back ends near 82.3 km with about 77.2 tonnes of propellant, booster apogee is about 144.8 km, and touchdown cutoff occurs after about 500 s with roughly 20.7 tonnes remaining, 0.01 m pad-center error, 0.25 m/s lateral speed, and less than 0.5° tilt.
 
-This is a pitched suborbital teaching mission, not an orbital Falcon 9 trajectory. It still omits atmosphere, max-Q scheduling, drag, wind, entry heating, Earth curvature/rotation, true mission downrange velocity, and a powered second stage.
+This is a pitched suborbital teaching mission, not an orbital Falcon 9 trajectory. It still omits atmosphere, max-Q scheduling, drag, wind, entry heating, Earth curvature/rotation, true mission downrange velocity, and orbital second-stage guidance.
 
 ### Automatic landing
 
@@ -298,17 +298,17 @@ Mass and thrust are both 30 times the original paper-example scale, preserving t
 | Full-stack launch-return parameter | Value |
 | --- | ---: |
 | Approximate total height with upper stack | approximately 70 m |
-| Liftoff mass | 549,054 kg |
+| Liftoff mass | 544,600 kg |
 | First-stage dry mass | 25,600 kg |
-| First-stage propellant | 395,700 kg |
-| Attached upper stack | 127,754 kg |
+| First-stage propellant / wet mass | 407,500 kg / 433,100 kg |
+| Second-stage dry mass / wet mass | 4,000 kg / 111,500 kg |
 | Ascent engines | 9 |
 | Total sea-level ascent thrust | approximately 7.607 MN |
 | Return engines | 3, then 1 |
 | Per-engine modeled vacuum thrust | 914 kN |
 | Modeled Merlin throttle interval | 57–100% |
 | Ascent/return specific impulse | 282 s / 311 s |
-| Upper-stage propellant | 92,670 kg |
+| Second-stage propellant | 107,500 kg |
 | Upper-stage thrust / specific impulse | 981 kN / 348 s |
 | Cutoff predicted-apogee target | 130 km |
 | Maximum ascent pitch | 18° from vertical |

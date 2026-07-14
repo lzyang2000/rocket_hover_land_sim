@@ -408,6 +408,7 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert simulation.controller.attached_mass_kg == pytest.approx(
     FALCON9_ATTACHED_UPPER_STACK_MASS_KG
   )
+  assert simulation.controller.stage_mass_kg == pytest.approx(433_100.0)
   assert simulation.active_engine_count == FALCON9_ASCENT_ENGINE_COUNT
   assert simulation.upper_stage_attached
   assert all(
@@ -499,15 +500,15 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert landing_phases.issuperset(
     {LandingPhase.COAST, LandingPhase.DESCEND, LandingPhase.COMPLETE}
   )
-  assert cutoff_fuel is not None and 75_000.0 < cutoff_fuel < 79_000.0
-  assert boostback_fuel is not None and 60_000.0 < boostback_fuel < 66_000.0
+  assert cutoff_fuel is not None and 90_000.0 < cutoff_fuel < 95_000.0
+  assert boostback_fuel is not None and 75_000.0 < boostback_fuel < 80_000.0
   assert separated_upper_stage_velocity is not None
   assert upper_stage_engine_seen
-  assert 145_000.0 < peak_height < 160_000.0
+  assert 140_000.0 < peak_height < 150_000.0
   assert simulation.launch_return_phase is LaunchReturnPhase.COMPLETE
   assert simulation.landing_phase is LandingPhase.COMPLETE
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
-  assert 12_000.0 < simulation.controller.fuel_mass_kg < 20_000.0
+  assert 18_000.0 < simulation.controller.fuel_mass_kg < 23_000.0
   assert simulation.controller.ignition_count == 2
   assert simulation.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
   assert simulation.landing_leg_deployment == pytest.approx(1.0)

@@ -27,6 +27,7 @@ from rocket_landing.sim import (
   ROCKET_LANDED_COM_Z_M,
   ROLL_RCS_MAX_THRUSTER_FORCE_N,
   THRUST_ARROW_MAX_LENGTH_M,
+  FALCON9_UPPER_STAGE_THRUST_N,
   RocketSimulation,
   RocketWindow,
   build_argument_parser,
@@ -249,6 +250,44 @@ def test_upper_stage_thrust_arrow_follows_its_engine_bell() -> None:
     -upper_rotation[:, 2] * THRUST_ARROW_MAX_LENGTH_M
   )
   assert upper_fraction == pytest.approx(1.0)
+
+
+def test_upper_stage_engine_adds_expected_velocity_over_ballistic_flight() -> None:
+  powered = RocketSimulation()
+  ballistic = RocketSimulation()
+  for simulation in (powered, ballistic):
+    assert simulation.start_launch_return()
+    simulation._separate_upper_stage()
+
+  powered.upper_stage_engine_active = True
+  ballistic.upper_stage_engine_active = False
+  powered._apply_control()
+  ballistic._apply_control()
+
+  dof = powered.upper_stage_dof_address
+  powered_velocity_before = powered.data.qvel[dof : dof + 3].copy()
+  ballistic_velocity_before = ballistic.data.qvel[dof : dof + 3].copy()
+  assert powered_velocity_before == pytest.approx(ballistic_velocity_before)
+
+  rotation = powered.data.xmat[
+    powered.separated_upper_stage_body_id
+  ].reshape(3, 3)
+  expected_thrust_acceleration = (
+    rotation[:, 2]
+    * FALCON9_UPPER_STAGE_THRUST_N
+    / powered.model.body_mass[powered.separated_upper_stage_body_id]
+  )
+  timestep = powered.model.opt.timestep
+  mujoco.mj_step(powered.model, powered.data)
+  mujoco.mj_step(ballistic.model, ballistic.data)
+
+  powered_velocity = powered.data.qvel[dof : dof + 3]
+  ballistic_velocity = ballistic.data.qvel[dof : dof + 3]
+  assert powered_velocity - ballistic_velocity == pytest.approx(
+    expected_thrust_acceleration * timestep,
+    rel=1e-5,
+    abs=1e-8,
+  )
 
 
 def test_thrust_arrow_is_appended_only_while_engine_is_lit() -> None:

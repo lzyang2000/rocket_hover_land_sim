@@ -143,15 +143,18 @@ The landing-condition dynamics use:
 
 The autonomous launch-return button replaces that teaching loadout with an approximate full stack:
 
-- liftoff mass: 549,054 kg;
+- liftoff mass: 544,600 kg;
 - first-stage dry mass: 25,600 kg;
-- first-stage propellant: 395,700 kg;
-- attached upper-stage/fairing/payload lumped mass: 127,754 kg;
+- first-stage propellant: 407,500 kg;
+- first-stage wet mass: 433,100 kg;
+- second-stage dry mass: 4,000 kg;
+- second-stage propellant: 107,500 kg;
+- second-stage wet mass: 111,500 kg;
 - nine-engine sea-level thrust: approximately 7.607 MN;
 - three-engine and one-engine return clusters using 914 kN per engine;
 - 282 s ascent and 311 s return specific impulse assumptions.
 
-The upper stack is combined with the first-stage mass properties through the parallel-axis theorem until separation. At separation its mass is removed from the booster, while its geometry transfers to a second free MuJoCo body. That body inherits the launch pose, angular rate, and translational velocity plus a 3 m/s axial separation push. After a one-second delay, a 981 kN axial engine ignites with 348 s specific impulse and 92,670 kg of propellant. Its mass and approximate inertia decrease during the burn, so it continues powered ascent instead of disappearing or passively falling away.
+The second stage is combined with the first-stage mass properties through the parallel-axis theorem until separation. At separation its mass is removed from the booster, while its geometry transfers to a second free MuJoCo body. That body inherits the launch pose, angular rate, and translational velocity plus a 3 m/s axial separation push. After a one-second delay, a 981 kN axial engine ignites with 348 s specific impulse and 107,500 kg of propellant. Its mass and approximate inertia decrease during the burn. At the 111,500 kg ignition mass the axial thrust acceleration is about 8.80 m/s², corresponding to a thrust-to-weight ratio near 0.90. On the simulator's steep suborbital path this initially reduces gravitational deceleration rather than immediately increasing vertical speed; after roughly 40 seconds of burn, mass depletion raises thrust-to-weight above one.
 
 The mass equation is
 
@@ -395,7 +398,7 @@ This creates horizontal velocity and a genuine downrange ballistic arc. At each 
 h_a=h+\frac{\max(v_z,0)^2}{2g}.
 \]
 
-When $h_a$ reaches the 130 km target—or first-stage propellant reaches the safety floor—the 127,754 kg upper stack separates into its free-flight body and the booster changes to a three-engine cluster. In the deterministic vacuum regression, this occurs near 52.9 km and 5.1 km downrange with approximately $(v_x,v_z)=(281,1230)$ m/s and 77.0 tonnes of propellant.
+When $h_a$ reaches the 130 km target—or first-stage propellant reaches the safety floor—the 111,500 kg second stage separates into its free-flight body and the booster changes to a three-engine cluster. The exact deterministic separation state is regression-tested because it changes with the full-stack mass assumptions.
 
 The booster does not immediately coast. It slews toward a 75° retrograde boost-back attitude. Minimum throttle is used during the large attitude change, then maximum throttle shifts the predicted vacuum impact point back toward the launch site. The launch ignition remains continuous through this maneuver. When the compensated impact target is reached, the engine shuts down and the booster enters ballistic coast. An equivalent bounded pitch/yaw cold-gas torque brings the stage upright during coast.
 
@@ -409,9 +412,9 @@ During the continuous reentry/landing burn, the vertical suicide-burn law uses d
 a_s=1.08\max\left(\frac{v^2-v_t^2}{2\max(h-1,0.2)},0\right),
 \]
 
-then commands $T=m(g+a_s)$ subject to the active engine bounds. Three engines are retained until this required thrust fits inside the one-engine interval; the controller then switches once to the center engine. Horizontal acceleration uses a finite-time pad-intercept law whose time scale is twice the instantaneous vacuum fall time, avoiding the earlier over-aggressive lateral oscillation caused by ignoring powered-braking duration. The deterministic regression reaches engine cutoff after about 488 s with approximately 16.3 tonnes of propellant remaining, 0.16 m position error, 0.38 m/s lateral speed, and less than 0.5° tilt.
+then commands $T=m(g+a_s)$ subject to the active engine bounds. Three engines are retained until this required thrust fits inside the one-engine interval; the controller then switches once to the center engine. Horizontal acceleration uses a finite-time pad-intercept law whose time scale is twice the instantaneous vacuum fall time, avoiding the earlier over-aggressive lateral oscillation caused by ignoring powered-braking duration. With the 433.1-tonne first-stage wet mass, the deterministic regression reaches engine cutoff after about 500 s with approximately 20.7 tonnes of propellant remaining, 0.01 m position error, 0.25 m/s lateral speed, and less than 0.5° tilt.
 
-This remains suborbital and simplified. A realistic launch would need atmospheric drag, max-Q and engine schedules, a much larger gravity turn toward orbital velocity, navigation over a rotating/curved Earth, continued upper-stage propulsion, and mission-specific boost-back/entry geometry.
+This remains suborbital and simplified. A realistic launch would need atmospheric drag, max-Q and engine schedules, a much larger gravity turn toward orbital velocity, navigation over a rotating/curved Earth, orbital upper-stage guidance, and mission-specific boost-back/entry geometry.
 
 ### Align
 
