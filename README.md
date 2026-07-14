@@ -50,7 +50,7 @@ The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal ap
 
 - MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, moving center of mass, inertia, and contact.
 - Falcon 9 first-stage proportions: approximately 41.2 m tall, 3.66 m diameter, and 18 m deployed leg span.
-- Four horizontally deployed grid fins, four folding landing legs, and a nine-engine base with the center engine shown firing during landing.
+- Four horizontally deployed grid fins, four folding landing legs, and a nine-engine base whose active 9/3/1 engine cluster is visible throughout the mission.
 - Main-engine force applied at the physical engine pivot, producing coupled pitch/yaw torque.
 - Full quaternion attitude and heading control with a physical opposed-thruster RCS roll couple.
 - Successive-linearization 6-DOF MPC solved as conic subproblems by CVXPY and Clarabel.
@@ -62,7 +62,7 @@ The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal ap
 - Keyboard and clickable GUI flight controls.
 - DPI-aware responsive GUI sizing for Retina, standard-density, and smaller displays.
 - Live directional indicators and a thrust slider that follow automatic guidance commands.
-- Live 3-D engine arrow whose direction follows gimbal and whose length follows thrust magnitude.
+- Live per-engine 3-D thrust arrows whose direction follows gimbal and whose length follows thrust magnitude.
 - Three-dimensional hover/position hold.
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
 - Relightable high-altitude ballistic coast with a dynamic landing-burn gate.
@@ -130,7 +130,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.2`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.3`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -173,11 +173,11 @@ During hover and auto-land, the slider becomes read-only and changes color to in
 
 When the engine is off, killed, fuel-depleted, or shut down after landing, the slider returns to its zero position and reads `THRUST 0.0% OFF` rather than retaining the last powered throttle command.
 
-### 3-D thrust arrow
+### 3-D thrust arrows
 
-A colored arrow is anchored at the center engine and follows the actual lagged gimbal state in manual, hover, and auto-land modes. Arrow length and thickness scale with applied thrust, while its color moves from orange toward cyan as thrust increases. It disappears immediately when the engine is off or killed.
+Each active engine receives a colored arrow anchored at its physical bell location. The full-stack ascent therefore shows nine arrows, boost-back and reentry show the center engine plus two opposed outer engines, and terminal landing shows the center arrow alone. The independently moving upper stage receives its own arrow after its engine ignites.
 
-The arrow is deliberately drawn outward through the visible plume, so it shows the nozzle/exhaust direction. The reaction force applied to the rocket points in the opposite direction.
+All booster arrows follow the actual lagged gimbal state. Their length and thickness scale with applied throttle, while color moves from orange toward cyan as thrust increases. They disappear immediately when the corresponding engine cluster is off or killed. Each arrow is deliberately drawn outward through the visible plume, so it shows nozzle/exhaust direction; the reaction force applied to the rocket points in the opposite direction.
 
 ## Operating modes
 
@@ -315,7 +315,7 @@ Mass and thrust are both 30 times the original paper-example scale, preserving t
 | Boost-back pitch | 75° retrograde from vertical |
 | Full-stack ignition budget | 2 total: launch and reentry/landing |
 
-The upper stack is inertially lumped into the launch vehicle until separation. At that event its visible geometry transfers to a second free rigid body with independent velocity, mass depletion, and axial propulsion. The nine- and three-engine forces on the booster are still applied as equivalent centered resultants at the engine section. This captures total force, fuel flow, mass ratio, separation loss, downrange motion, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine allocation. The full-stack mission uses explicit deterministic energy/stopping-distance guidance rather than the short-horizon landing MPC; the GUI labels this intentional owner as `RETURN ACTIVE`, not as an MPC fallback.
+The upper stack is inertially lumped into the launch vehicle until separation. At that event its visible geometry transfers to a second free rigid body with independent velocity, mass depletion, and axial propulsion. The nine- and three-engine forces on the booster are still applied as equivalent centered resultants at the engine section. The per-engine arrows make the selected physical cluster visible, but each arrow shares the cluster's common throttle and gimbal command. This captures total force, fuel flow, mass ratio, separation loss, downrange motion, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine allocation. The full-stack mission uses explicit deterministic energy/stopping-distance guidance rather than the short-horizon landing MPC; the GUI labels this intentional owner as `RETURN ACTIVE`, not as an MPC fallback.
 
 The tank intervals and RCS force level are transparent engineering assumptions, not published Block 5 specifications. A real Falcon 9 combines phase-dependent differential engine gimballing, aerodynamic grid-fin authority, and cold-gas attitude control; this single-engine landing model uses the opposed force pair as the explicit low-authority axial actuator.
 

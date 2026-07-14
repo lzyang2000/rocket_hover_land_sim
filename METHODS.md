@@ -401,6 +401,8 @@ The booster does not immediately coast. It slews toward a 75° retrograde boost-
 
 The engine model gives the full-stack mission exactly two ignition events: launch and one combined reentry/landing relight. Consequently, the high-altitude state machine cannot chatter between coast and descend. Once ignition count two is reached, re-coast is forbidden and the engine remains lit until touchdown cutoff.
 
+The 3-D thrust visualization exposes the active cluster at the physical engine-bell coordinates: nine arrows during ascent, the center engine plus two opposed outer engines during the three-engine return burn, and one center arrow during terminal landing. A separate arrow follows the free upper-stage body after its engine ignites. Arrow direction uses the lagged mechanical gimbal state and points along exhaust flow, opposite the applied reaction force. These are per-engine visualizations of the aggregate cluster command; the dynamics still apply one equivalent resultant and do not model differential throttle or differential gimbal allocation.
+
 During the continuous reentry/landing burn, the vertical suicide-burn law uses downward speed $v$, height $h$, and target touchdown speed $v_t$ to request
 
 \[

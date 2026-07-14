@@ -206,7 +206,7 @@ GUI_PANEL_MARGIN = 22.0
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.2 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.3 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -327,6 +327,12 @@ class RocketSimulation:
       mujoco.mjtObj.mjOBJ_GEOM,
       "separated_upper_stage_flame",
     )
+    self.upper_stage_flame_origin_body = self.model.geom_pos[
+      self.separated_upper_stage_flame_geom_id
+    ].copy()
+    self.upper_stage_flame_origin_body[2] += self.model.geom_size[
+      self.separated_upper_stage_flame_geom_id, 1
+    ]
     self.separated_upper_stage_body_id = mujoco.mj_name2id(
       self.model,
       mujoco.mjtObj.mjOBJ_BODY,
@@ -2667,32 +2673,64 @@ class RocketSimulation:
   def thrust_arrow_world(
     self,
   ) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """Return plume-facing arrow endpoints and normalized thrust magnitude.
+    """Return the first plume-facing arrow for compatibility."""
 
-    The arrow exits the engine bell like the visible plume. It therefore points
-    along the exhaust direction; the force applied to the vehicle points in the
-    opposite direction.
+    arrows = self.thrust_arrows_world()
+    return arrows[0] if arrows else None
+
+  def _active_booster_engine_indices(self) -> tuple[int, ...]:
+    return {
+      FALCON9_TERMINAL_ENGINE_COUNT: (0,),
+      FALCON9_RETURN_ENGINE_COUNT: (0, 1, 5),
+      FALCON9_ASCENT_ENGINE_COUNT: tuple(range(9)),
+    }.get(self.active_engine_count, (0,))
+
+  def thrust_arrows_world(
+    self,
+  ) -> tuple[tuple[np.ndarray, np.ndarray, float], ...]:
+    """Return one plume-facing arrow for every active physical engine.
+
+    Arrows exit their individual engine bells along the exhaust direction. The
+    reaction force applied to each vehicle points in the opposite direction.
     """
 
+    arrows: list[tuple[np.ndarray, np.ndarray, float]] = []
     thrust = self.controller.thrust_magnitude_newtons()
     maximum = self.controller.limits.max_thrust_newtons
-    if self.controller.engine_state is not EngineState.LIT or thrust <= 0.0:
-      return None
+    if self.controller.engine_state is EngineState.LIT and thrust > 0.0:
+      rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
+      plume_direction_world = -rotation @ gimbal_direction_body(
+        self.engine_gimbal_radians
+      )
+      magnitude_fraction = float(np.clip(thrust / maximum, 0.0, 1.0))
+      body_origin_world = self.data.xpos[self.rocket_body_id]
+      for engine_index in self._active_booster_engine_indices():
+        origin = (
+          body_origin_world
+          + rotation @ self.flame_base_positions_body[engine_index]
+        )
+        tip = (
+          origin
+          + plume_direction_world
+          * THRUST_ARROW_MAX_LENGTH_M
+          * magnitude_fraction
+        )
+        arrows.append((origin.copy(), tip, magnitude_fraction))
 
-    rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
-    force_direction_world = rotation @ gimbal_direction_body(
-      self.engine_gimbal_radians
-    )
-    plume_direction_world = -force_direction_world
-    magnitude_fraction = float(np.clip(thrust / maximum, 0.0, 1.0))
-    origin = self.data.site_xpos[self.thrust_site_id].copy()
-    tip = (
-      origin
-      + plume_direction_world
-      * THRUST_ARROW_MAX_LENGTH_M
-      * magnitude_fraction
-    )
-    return origin, tip, magnitude_fraction
+    if self.upper_stage_engine_active:
+      upper_rotation = self.data.xmat[
+        self.separated_upper_stage_body_id
+      ].reshape(3, 3)
+      upper_origin = (
+        self.data.xpos[self.separated_upper_stage_body_id]
+        + upper_rotation @ self.upper_stage_flame_origin_body
+      )
+      upper_tip = (
+        upper_origin
+        - upper_rotation[:, 2] * THRUST_ARROW_MAX_LENGTH_M
+      )
+      arrows.append((upper_origin, upper_tip, 1.0))
+    return tuple(arrows)
 
   def _update_model_mass(self, *, force: bool = False) -> None:
     current_mass = self.controller.wet_mass_kg
@@ -2794,11 +2832,7 @@ class RocketSimulation:
       cross[2] / scale,
       ]
     )
-    active_indices = {
-      FALCON9_TERMINAL_ENGINE_COUNT: {0},
-      FALCON9_RETURN_ENGINE_COUNT: {0, 1, 5},
-      FALCON9_ASCENT_ENGINE_COUNT: set(range(9)),
-    }.get(self.active_engine_count, {0})
+    active_indices = set(self._active_booster_engine_indices())
     for index, (geom_id, base_position) in enumerate(
       zip(self.flame_geom_ids, self.flame_base_positions_body, strict=True)
     ):
@@ -3988,44 +4022,47 @@ class RocketWindow:
     self._draw_button(framebuffer_width, framebuffer_height)
 
   def _append_thrust_arrow(self) -> None:
-    """Append the live thrust visualization to the current MuJoCo scene."""
+    """Append one live thrust arrow for each active engine."""
 
-    arrow = self.simulation.thrust_arrow_world()
-    if arrow is None or self.scene.ngeom >= self.scene.maxgeom:
+    arrows = self.simulation.thrust_arrows_world()
+    if not arrows:
       return
 
-    origin, tip, magnitude_fraction = arrow
-    rgba = np.array(
-      [
-        1.0 - 0.70 * magnitude_fraction,
-        0.45 + 0.45 * magnitude_fraction,
-        0.08 + 0.92 * magnitude_fraction,
-        0.96,
-      ],
-      dtype=np.float32,
-    )
-    width = (
-      THRUST_ARROW_MIN_WIDTH_M
-      + (THRUST_ARROW_MAX_WIDTH_M - THRUST_ARROW_MIN_WIDTH_M)
-      * magnitude_fraction
-    )
-    geom = self.scene.geoms[self.scene.ngeom]
-    mujoco.mjv_initGeom(
-      geom,
-      mujoco.mjtGeom.mjGEOM_ARROW.value,
-      np.zeros(3, dtype=np.float64),
-      origin,
-      np.eye(3, dtype=np.float64).reshape(-1),
-      rgba,
-    )
-    mujoco.mjv_connector(
-      geom,
-      mujoco.mjtGeom.mjGEOM_ARROW.value,
-      width,
-      origin,
-      tip,
-    )
-    self.scene.ngeom += 1
+    width_scale = 1.0 / math.sqrt(max(len(arrows), 1))
+    for origin, tip, magnitude_fraction in arrows:
+      if self.scene.ngeom >= self.scene.maxgeom:
+        break
+      rgba = np.array(
+        [
+          1.0 - 0.70 * magnitude_fraction,
+          0.45 + 0.45 * magnitude_fraction,
+          0.08 + 0.92 * magnitude_fraction,
+          0.96,
+        ],
+        dtype=np.float32,
+      )
+      width = width_scale * (
+        THRUST_ARROW_MIN_WIDTH_M
+        + (THRUST_ARROW_MAX_WIDTH_M - THRUST_ARROW_MIN_WIDTH_M)
+        * magnitude_fraction
+      )
+      geom = self.scene.geoms[self.scene.ngeom]
+      mujoco.mjv_initGeom(
+        geom,
+        mujoco.mjtGeom.mjGEOM_ARROW.value,
+        np.zeros(3, dtype=np.float64),
+        origin,
+        np.eye(3, dtype=np.float64).reshape(-1),
+        rgba,
+      )
+      mujoco.mjv_connector(
+        geom,
+        mujoco.mjtGeom.mjGEOM_ARROW.value,
+        width,
+        origin,
+        tip,
+      )
+      self.scene.ngeom += 1
 
   def run(self) -> None:
     previous_time = time.monotonic()

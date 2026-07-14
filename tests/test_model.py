@@ -198,6 +198,59 @@ def test_thrust_arrow_tracks_engine_magnitude_and_gimbal_direction() -> None:
   )
 
 
+def test_thrust_arrows_match_active_engine_count_and_bell_positions() -> None:
+  simulation = RocketSimulation()
+  assert simulation.start_launch_return()
+
+  ascent_arrows = simulation.thrust_arrows_world()
+  assert len(ascent_arrows) == 9
+  rotation = simulation.data.xmat[simulation.rocket_body_id].reshape(3, 3)
+  body_origin = simulation.data.xpos[simulation.rocket_body_id]
+  expected_origins = [
+    body_origin + rotation @ position
+    for position in simulation.flame_base_positions_body
+  ]
+  for arrow, expected_origin in zip(
+    ascent_arrows,
+    expected_origins,
+    strict=True,
+  ):
+    assert arrow[0] == pytest.approx(expected_origin)
+
+  simulation._set_return_engine_count(3)
+  assert len(simulation.thrust_arrows_world()) == 3
+  simulation._set_return_engine_count(1)
+  assert len(simulation.thrust_arrows_world()) == 1
+
+
+def test_upper_stage_thrust_arrow_follows_its_engine_bell() -> None:
+  simulation = RocketSimulation()
+  assert simulation.start_launch_return()
+  simulation._separate_upper_stage()
+  simulation.upper_stage_engine_active = True
+
+  upper_position = np.array([14.0, -8.0, 320.0])
+  qpos_address = simulation.upper_stage_qpos_address
+  simulation.data.qpos[qpos_address : qpos_address + 3] = upper_position
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  arrows = simulation.thrust_arrows_world()
+  assert len(arrows) == 4
+  upper_origin, upper_tip, upper_fraction = arrows[-1]
+  upper_rotation = simulation.data.xmat[
+    simulation.separated_upper_stage_body_id
+  ].reshape(3, 3)
+  expected_origin = (
+    upper_position
+    + upper_rotation @ simulation.upper_stage_flame_origin_body
+  )
+  assert upper_origin == pytest.approx(expected_origin)
+  assert upper_tip - upper_origin == pytest.approx(
+    -upper_rotation[:, 2] * THRUST_ARROW_MAX_LENGTH_M
+  )
+  assert upper_fraction == pytest.approx(1.0)
+
+
 def test_thrust_arrow_is_appended_only_while_engine_is_lit() -> None:
   window = RocketWindow.__new__(RocketWindow)
   window.simulation = RocketSimulation()
@@ -224,6 +277,11 @@ def test_thrust_arrow_is_appended_only_while_engine_is_lit() -> None:
   window._append_thrust_arrow()
   assert window.scene.ngeom == base_geom_count + 1
   assert window.scene.geoms[base_geom_count].type == mujoco.mjtGeom.mjGEOM_ARROW
+
+  window.simulation.reset()
+  assert window.simulation.start_launch_return()
+  window._append_thrust_arrow()
+  assert window.scene.ngeom == base_geom_count + 10
 
 
 def test_powered_six_dof_controller_removes_axial_spin_and_tilt_rates() -> None:
