@@ -20,6 +20,7 @@ from rocket_landing.sim import (
   ASYNC_MPC_MAX_ACCEPT_AGE_S,
   HOVER_TARGET_SPEED_MPS,
   LandingPhase,
+  LaunchReturnPhase,
   MAX_ROLL_CONTROL_TORQUE_NM,
   ROCKET_DIAMETER_M,
   ROCKET_HEIGHT_M,
@@ -632,6 +633,15 @@ def test_kill_button_hitbox_matches_drawn_rectangle() -> None:
     land_x + land_width / 2, land_y + land_height / 2, 1280
   )
 
+  launch_x, launch_y, launch_width, launch_height = (
+    RocketWindow._launch_return_button_rect_window(1280)
+  )
+  assert RocketWindow._point_in_launch_return_button(
+    launch_x + launch_width / 2,
+    launch_y + launch_height / 2,
+    1280,
+  )
+
   direction_rects = RocketWindow._direction_button_rects_window(1280)
   for direction, (button_x, button_y, button_width, button_height) in (
     direction_rects.items()
@@ -668,6 +678,7 @@ def test_gui_layout_scales_for_small_and_large_windows() -> None:
       RocketWindow._engine_button_rect_window(window_width),
       RocketWindow._hover_button_rect_window(window_width),
       RocketWindow._land_button_rect_window(window_width),
+      RocketWindow._launch_return_button_rect_window(window_width),
       RocketWindow._thrust_slider_rect_window(window_width),
       RocketWindow._controller_indicator_rect_window(window_width),
       *RocketWindow._direction_button_rects_window(window_width).values(),
@@ -795,6 +806,13 @@ def test_controller_indicator_reports_manual_pd_and_mpc_ownership() -> None:
   label, _ = window._controller_indicator_style()
   assert label == "PD ACTIVE"
 
+  window.simulation.hover_enabled = False
+  window.simulation.launch_return_phase = LaunchReturnPhase.BOOST
+  label, _ = window._controller_indicator_style()
+  assert label == "LAUNCH ACTIVE"
+  window.simulation.launch_return_phase = LaunchReturnPhase.INACTIVE
+  window.simulation.hover_enabled = True
+
   window.simulation.landing_phase = LandingPhase.COAST
   label, _ = window._controller_indicator_style()
   assert label == "COAST ACTIVE"
@@ -831,6 +849,7 @@ def test_short_key_events_trigger_mode_commands() -> None:
     glfw.KEY_I: False,
     glfw.KEY_K: False,
     glfw.KEY_L: False,
+    glfw.KEY_J: False,
     glfw.KEY_R: False,
   }
 
@@ -845,3 +864,6 @@ def test_short_key_events_trigger_mode_commands() -> None:
 
   window._on_key(None, glfw.KEY_R, 0, glfw.PRESS, 0)
   assert window.simulation.controller.engine_state.name == "OFF"
+
+  window._on_key(None, glfw.KEY_J, 0, glfw.PRESS, 0)
+  assert window.simulation.launch_return_phase is LaunchReturnPhase.BOOST

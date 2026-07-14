@@ -16,6 +16,39 @@ class MassProperties:
   inertia_at_com_kgm2: np.ndarray
 
 
+def combine_axial_mass_properties(
+  primary: MassProperties,
+  *,
+  attached_mass_kg: float,
+  attached_center_z_m: float,
+  attached_inertia_at_com_kgm2: np.ndarray,
+) -> MassProperties:
+  """Combine a coaxial rigid body with an attached upper stack."""
+
+  attached_mass = float(attached_mass_kg)
+  if attached_mass <= 0.0:
+    return primary
+  attached_inertia = np.asarray(attached_inertia_at_com_kgm2, dtype=float)
+  total_mass = primary.mass_kg + attached_mass
+  primary_center_z = float(primary.center_of_mass_body_m[2])
+  combined_center_z = (
+    primary.mass_kg * primary_center_z
+    + attached_mass * float(attached_center_z_m)
+  ) / total_mass
+  inertia = primary.inertia_at_com_kgm2.copy() + attached_inertia
+  primary_offset = primary_center_z - combined_center_z
+  attached_offset = float(attached_center_z_m) - combined_center_z
+  inertia[0:2] += (
+    primary.mass_kg * primary_offset**2
+    + attached_mass * attached_offset**2
+  )
+  return MassProperties(
+    mass_kg=total_mass,
+    center_of_mass_body_m=np.array([0.0, 0.0, combined_center_z]),
+    inertia_at_com_kgm2=inertia,
+  )
+
+
 @dataclass(frozen=True)
 class PropellantTank:
   """Axisymmetric effective liquid column used during the landing reserve."""

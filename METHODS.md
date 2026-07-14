@@ -141,6 +141,18 @@ The landing-condition dynamics use:
 - initial pitch/yaw inertia: approximately `4.3e6 kg m^2`;
 - initial roll inertia: approximately `6.0e4 kg m^2`.
 
+The autonomous launch-return button replaces that teaching loadout with an approximate full stack:
+
+- liftoff mass: 549,054 kg;
+- first-stage dry mass: 25,600 kg;
+- first-stage propellant: 395,700 kg;
+- attached upper-stage/fairing/payload lumped mass: 127,754 kg;
+- nine-engine sea-level thrust: approximately 7.607 MN;
+- three-engine and one-engine return clusters using 914 kN per engine;
+- 282 s ascent and 311 s return specific impulse assumptions.
+
+The upper stack is combined with the first-stage mass properties through the parallel-axis theorem until separation. At separation its mass and visuals are removed, while the first-stage free-body pose and velocity remain continuous. The upper stage is not propagated as a second MuJoCo body.
+
 The mass equation is
 
 \[
@@ -367,6 +379,28 @@ Hover captures a target position with zero target velocity, identity attitude, a
 
 Auto-land supplies references through three powered/ballistic phases:
 
+### Launch-return mission
+
+The autonomous launch-return mode is a vertical full-stack boost–separation–landing experiment layered above the normal landing state machine. During BOOST, all nine modeled engines run at their upper bound and attitude control holds the stack upright. At each physics step guidance predicts the zero-thrust apogee
+
+\[
+h_a=h+\frac{\max(v_z,0)^2}{2g}.
+\]
+
+When $h_a$ reaches the 130 km target—or first-stage propellant reaches the 70 tonne safety floor—the ascent engines cut off. The attached 127,754 kg upper stack is jettisoned, the first stage enters relightable COAST, and the return engine model changes to a three-engine cluster. In the deterministic vacuum regression, cutoff occurs near 51.9 km and +1,238 m/s with about 80.2 tonnes of propellant remaining.
+
+The booster coasts to about 130 km. A three-engine cluster handles the first high-energy braking segment. Guidance switches to one engine only when both a mass threshold and a one-engine stopping-distance calculation show that the remaining altitude can absorb the current downward velocity. If an early burn over-brakes while substantial altitude remains, the engine returns to the relightable coast state instead of wasting minimum thrust.
+
+Below 200 m, the full-stack return uses a vertical suicide-burn law. For downward speed $v$, height $h$, and target touchdown speed $v_t$, it requests the net upward deceleration
+
+\[
+a_s=1.03\max\left(\frac{v^2-v_t^2}{2\max(h,0.2)},0\right),
+\]
+
+then commands $T=m(g+a_s)$ subject to the active engine bounds. If this drops below minimum thrust, the engine enters relightable coast; it does not pretend that a forbidden low thrust is available. The deterministic regression lands after about 490 s with approximately 21.9 tonnes of propellant remaining.
+
+This is still intentionally vertical and suborbital. A realistic launch would need atmospheric drag, max-Q and engine schedules, a gravity turn, navigation over a rotating Earth, continued upper-stage flight, and a separate downrange boost-back/entry geometry.
+
 ### Align
 
 Normal auto-land establishes a staging altitude at least 25 m above the pad. If auto-land is selected below that height, the vehicle climbs to staging before descent; if selected higher without significant upward velocity, it holds the current altitude. A manual high-thrust takeoff can have substantial upward momentum when LAND is clicked. Freezing staging at the click altitude would make the rocket overshoot and then spend a long time returning to an obsolete target. Guidance therefore estimates the strongest downward acceleration available while the lit engine remains at its nonzero minimum thrust,
@@ -533,6 +567,7 @@ auto-land takes over and the trigger latches for the flight. The threshold is ca
 
 The GUI displays the controller that currently owns the actuators:
 
+- `LAUNCH ACTIVE` during the bounded maximum-thrust boost;
 - `MPC ACTIVE` after a valid SCvx result is accepted;
 - `COAST ACTIVE` while the engine is armed at zero thrust;
 - `TERMINAL ACTIVE` during the scheduled final-approach handoff;

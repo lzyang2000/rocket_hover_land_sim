@@ -52,6 +52,13 @@
       <geom name="interstage" type="cylinder" pos="0 0 18.42" size="1.83 2.02" material="carbon"/>
       <geom name="interstage_lip" type="cylinder" pos="0 0 20.31" size="1.91 0.13" material="soot" contype="0" conaffinity="0"/>
 
+      <!-- Full-stack ascent visuals. Python hides these in the landing lab and
+           jettisons them when the autonomous launch-return mission separates. -->
+      <geom name="upper_stage" type="cylinder" pos="0 0 27.15" size="1.83 6.70" material="white" contype="0" conaffinity="0"/>
+      <geom name="upper_stage_skirt" type="cylinder" pos="0 0 20.72" size="1.86 0.30" material="soot" contype="0" conaffinity="0"/>
+      <geom name="payload_fairing_lower" type="cylinder" pos="0 0 37.45" size="2.60 3.60" material="white" contype="0" conaffinity="0"/>
+      <geom name="payload_fairing_upper" type="ellipsoid" pos="0 0 44.15" size="2.60 2.60 6.70" material="white" contype="0" conaffinity="0"/>
+
       <!-- Sooted engine section and octaweb. -->
       <geom name="lower_skirt" type="cylinder" pos="0 0 -18.15" size="1.90 0.75" material="soot"/>
       <geom name="octaweb" type="cylinder" pos="0 0 -19.22" size="1.66 0.32" material="carbon"/>
@@ -90,6 +97,14 @@
       <geom name="engine_8" type="cylinder" pos="0.75 -0.75 -19.82" size="0.34 0.27" material="engine" contype="0" conaffinity="0"/>
 
       <geom name="engine_flame" type="cylinder" pos="0 0 -20.60" size="0.30 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_1" type="cylinder" pos="1.06 0 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_2" type="cylinder" pos="0.75 0.75 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_3" type="cylinder" pos="0 1.06 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_4" type="cylinder" pos="-0.75 0.75 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_5" type="cylinder" pos="-1.06 0 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_6" type="cylinder" pos="-0.75 -0.75 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_7" type="cylinder" pos="0 -1.06 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
+      <geom name="engine_flame_8" type="cylinder" pos="0.75 -0.75 -20.60" size="0.25 0.50" rgba="1 0.28 0.03 0" contype="0" conaffinity="0" group="3"/>
       <site name="thrust_origin" pos="0 0 -20.10" size="0.11" rgba="1 0.55 0.1 1"/>
       <!-- Opposed tangential RCS sites form a zero-net-force roll couple. -->
       <site name="roll_rcs_xp" pos="1.75 0 15.25" size="0.09" rgba="0.15 0.75 1 0.8"/>

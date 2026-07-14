@@ -233,7 +233,7 @@ When should the engine relight if the rocket is falling rapidly from high altitu
 
 1. Climb vertically above 40 m and start auto-land.
 2. Observe engine cutoff, constant fuel during coast, and automatic relight.
-3. Repeat with a much higher centered state or run the 1,000 m regression.
+3. Repeat with a much higher centered state or run the 1,000 m landing-only regression. Use `LAUNCH + RETURN` separately to observe the 130 km full-stack mission.
 4. Compare the ordinary descent-speed bands with the post-coast energy corridor.
 
 ### Expected observations

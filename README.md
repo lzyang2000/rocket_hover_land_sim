@@ -1,6 +1,6 @@
 # MuJoCo 3-D rocket landing lab
 
-An interactive powered-descent rocket simulator designed to run natively on macOS. It includes a full-scale Falcon 9 first-stage silhouette, manual gimbaled flight, position hold, automatic landing, fuel depletion, landing-leg contact, and live GUI controls.
+An interactive rocket-flight and powered-descent simulator designed to run natively on macOS. It includes a full-scale Falcon 9 first-stage silhouette, a temporary upper-stage/fairing stack for launch, manual gimbaled flight, position hold, automatic landing, fuel depletion, landing-leg contact, and live GUI controls.
 
 The MuJoCo vehicle and controller are six-degree-of-freedom. Thrust limits originate with Açıkmeşe, Carson, and Blackmore (2013); hover and landing use a receding-horizon adaptation of the successive-convexification method from Szmuk, Reynolds, and Açıkmeşe (2020).
 
@@ -34,7 +34,7 @@ flowchart LR
   S --> P
 ```
 
-The auto-land phase (`ALIGN`, `COAST`, `DESCEND`, or `TERMINAL`) answers “what should the rocket do next?” MPC or PD answers “what bounded actuator command should track that request?” MuJoCo answers “what actually happens?”
+The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal approach) answers “what should the rocket do next?” MPC or PD answers “what bounded actuator command should track that request?” MuJoCo answers “what actually happens?”
 
 ## Suggested learning path
 
@@ -66,10 +66,11 @@ The auto-land phase (`ALIGN`, `COAST`, `DESCEND`, or `TERMINAL`) answers “what
 - Three-dimensional hover/position hold.
 - Automatic pad alignment, descent, touchdown cutoff, and settling.
 - Relightable high-altitude ballistic coast with a dynamic landing-burn gate.
+- Autonomous full-stack 130 km vertical boost, separation, coast, and first-stage return to the launch pad.
 - Automatic landing takeover at 1.05 times the estimated landing-fuel reserve.
 - Deterministic 6-DOF PD control when an MPC solve is unavailable or rejected.
-- A controller-owner badge that reports `MPC ACTIVE`, `TERMINAL ACTIVE`,
-  `PD ACTIVE`, or `MANUAL TVC`.
+- A controller-owner badge that reports launch, coast, MPC, terminal-PD,
+  recovery-PD, or manual TVC ownership.
 
 ## Requirements
 
@@ -129,7 +130,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.9.24`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.0`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -147,6 +148,7 @@ All keyboard flight controls have clickable equivalents in the right-side GUI.
 | `D` / GUI `D` | Gimbal toward world `+X` | Move target toward `+X` | Indicator only |
 | `H` / `HOVER HOLD` | Capture current position | Disable hold | Cancel guidance to hold |
 | `L` / `AUTO LAND` | Begin automatic landing | Begin automatic landing | Cancel to hover |
+| `J` / `LAUNCH + RETURN` | Start autonomous launch-return from the pad | Unavailable | Mission active |
 | `K` / `KILL ENGINE` | Cut directly to zero | Abort and cut | Abort and cut |
 | `R` | Reset vehicle, fuel, and engine | Reset | Reset |
 | `Esc` | Close window | Close window | Close window |
@@ -199,11 +201,30 @@ In hover mode:
 
 WASD remains position-target driven: the position error and measured rocket velocity provide the PD/MPC feedback needed to track the moving waypoint. The controller does not falsely label the waypoint itself as travelling at 3 m/s. The horizontal target is limited to a 3.5 m lead and the altitude target to a 2 m lead relative to the rocket; holding a key keeps advancing this bounded “carrot” as the vehicle moves instead of allowing a large error to accumulate. Manual WASD steering also reaches its requested gimbal direction 50% faster. Because the gimbaled engine is below the center of mass, the rocket still briefly counter-gimbals to create the required tilt, but hover MPC commands are limited to 5° of gimbal to suppress swinging. The automatic PD recovery envelope and high-altitude landing limit remain 6°.
 
-Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC` appears when the optional background-worker mode is selected. `6-DOF PD` means the deterministic PD controller owns the vehicle because a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude PD handoff. The right-side ownership badge makes the current state explicit: green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `PD ACTIVE`, or gray `MANUAL TVC`.
+Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC` appears when the optional background-worker mode is selected. `6-DOF PD` means the deterministic PD controller owns the vehicle because a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude PD handoff. The right-side ownership badge makes the current state explicit: purple `LAUNCH ACTIVE`, cyan `COAST ACTIVE`, green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `PD ACTIVE`, or gray `MANUAL TVC`.
 
 SCvx virtual control is penalized strongly enough that an optimizer result cannot improve tracking by effectively “teleporting” its linearized state away from the nonlinear rocket. This is especially important after a high-energy coast relight. In the full-throttle fuel-auto regression, accepted MPC ownership rises from zero to about 72% of above-terminal solve attempts while the flight still lands below the 100 kg reserve target. Remaining numerical or defect rejections continue safely under `PD ACTIVE`.
 
 Synchronous mode can pause rendering and input briefly during a solve—typically around 70–150 ms after warm-up on the development Mac—but it avoids applying a command computed from an older rocket state and an older WASD target. Async mode keeps the window smoother at the cost of that command latency.
+
+### Launch and return
+
+Press `J` or click `LAUNCH + RETURN` while the reset rocket is stationary on the pad. The mission runs
+
+```text
+9-ENGINE BOOST → MECO + SEPARATION → BALLISTIC COAST
+→ 3-ENGINE RETURN BURN → 1-ENGINE TERMINAL BURN → COMPLETE
+```
+
+The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 549,054 kg at liftoff, 395,700 kg of first-stage propellant, a lumped 127,754 kg upper-stage/fairing/payload stack, and nine visible Merlin-class engines. BOOST commands the nine-engine upper throttle bound while the attitude controller holds the stack upright. Rather than cutting off at a fixed clock time, guidance predicts the zero-thrust apogee
+
+\[
+h_a=h+\frac{\max(v_z,0)^2}{2g}
+\]
+
+and cuts off when that prediction reaches 130 km. In the deterministic vacuum regression this occurs after about 114.7 s, near 51.9 km altitude and +1,238 m/s, with about 80.2 tonnes of first-stage propellant remaining. The upper stack is then visually and dynamically jettisoned. The booster coasts to approximately 130 km, begins high-energy braking with an equivalent three-engine cluster, switches to one engine when a one-engine stopping corridor becomes feasible, and lands at the origin after about 490 s with roughly 21.9 tonnes remaining.
+
+This is still a vertical suborbital teaching mission, not an orbital Falcon 9 trajectory. It now includes the full-stack mass load, first-stage propellant, nine-engine ascent thrust, and a separation mass drop, but it does not include a gravity turn, orbital downrange velocity, atmosphere, max-Q scheduling, drag, wind, entry heating, boost-back geometry, or continued upper-stage flight. Those omissions are why the vertical booster can return with much more propellant than a real mission.
 
 ### Automatic landing
 
@@ -243,9 +264,9 @@ The engine normally cuts directly to zero once horizontal error is below 0.50 m,
 
 ## Falcon 9-like dimensions and dynamics
 
-The exterior uses public Falcon 9 first-stage dimensions and recognizable proportions. The dynamics use an approximate depleted landing configuration, not a claim of exact SpaceX mass properties or engine control limits.
+Manual flight, hover, and ordinary auto-land use the smaller depleted-booster teaching configuration. `LAUNCH + RETURN` temporarily installs a separate full-stack ascent configuration and returns to the landing configuration on reset. Both use public dimensions and approximate public mass/thrust data; neither claims to reproduce proprietary SpaceX mass properties or flight software.
 
-| Parameter | Value |
+| Landing-lab parameter | Value |
 | --- | ---: |
 | Stage height | approximately 41.2 m |
 | Tank diameter | 3.66 m |
@@ -269,9 +290,26 @@ The exterior uses public Falcon 9 first-stage dimensions and recognizable propor
 
 Mass and thrust are both 30 times the original paper-example scale, preserving the same thrust-to-weight ratio while making the vehicle mass more representative of a depleted booster. Initial inertia is matched to the tall stage. As fuel drains, effective LOX and RP-1 liquid columns shorten toward their tank bottoms; MuJoCo and the MPC use the resulting shared COM, inertia, and engine lever arm rather than a uniform inertia-to-mass scale.
 
+| Full-stack launch-return parameter | Value |
+| --- | ---: |
+| Approximate total height with upper stack | approximately 70 m |
+| Liftoff mass | 549,054 kg |
+| First-stage dry mass | 25,600 kg |
+| First-stage propellant | 395,700 kg |
+| Attached upper stack | 127,754 kg |
+| Ascent engines | 9 |
+| Total sea-level ascent thrust | approximately 7.607 MN |
+| Return engines | 3, then 1 |
+| Per-engine modeled vacuum thrust | 914 kN |
+| Modeled Merlin throttle interval | 57–100% |
+| Ascent/return specific impulse | 282 s / 311 s |
+| Target vertical apogee | 130 km |
+
+The upper stack is a visible and inertially lumped load until separation; it is not a second independently simulated rigid body. The nine- and three-engine forces are applied as an equivalent centered resultant at the engine section. This captures total force, fuel flow, mass ratio, separation mass loss, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine control allocation. The 130 km mission uses explicit deterministic energy/stopping-distance guidance rather than the short-horizon landing MPC; the GUI labels this intentional owner as `RETURN ACTIVE`, not as an MPC fallback.
+
 The tank intervals and RCS force level are transparent engineering assumptions, not published Block 5 specifications. A real Falcon 9 combines phase-dependent differential engine gimballing, aerodynamic grid-fin authority, and cold-gas attitude control; this single-engine landing model uses the opposed force pair as the explicit low-authority axial actuator.
 
-The 20–80% throttle interval still comes from the paper-inspired educational model. A real Falcon 9 landing burn has different engine limits and generally cannot settle into a sustained hover because minimum Merlin thrust can exceed the nearly empty stage's weight. This simulator deliberately retains hover mode for control experiments.
+The 20–80% throttle interval applies to the landing lab and still comes from the paper-inspired educational model. The full-stack mission instead uses a 57–100% Merlin-class interval. Its terminal vertical law continually recomputes the thrust needed to spend the available stopping distance, and enters relightable coast whenever the requested thrust falls below the nonzero engine minimum. A real Falcon 9 still has different engine maps, relight limits, atmosphere, navigation, and mission-specific guidance.
 
 ## Is it 6-DOF?
 
@@ -340,6 +378,7 @@ Each experiment isolates one control concept:
 | Translation–attitude coupling | Hover and tap one WASD key | Initial counter-gimbal rotates the stage before lateral motion develops |
 | MPC validation | Watch `MPC ACTIVE` and `PD ACTIVE` during landing | Optimizer output is used only after nonlinear-defect validation |
 | Ballistic landing | Begin a centered landing above 32 m | Fuel flow reaches zero during `COAST`, then relight occurs from stopping distance |
+| Launch and return | Press `J` from reset | Predicted apogee triggers cutoff; the same landing controller returns to the origin |
 | Fuel emergency | Launch vertically at full throttle and wait | Fuel auto skips wasteful powered alignment and lands with a small deterministic reserve |
 | Async latency | Compare default and `--async-mpc` | Async rendering is smoother, but stale or mismatched trajectories are rejected |
 | Terminal control | Watch the final 7 m | Control intentionally switches to terminal PD as gimbal authority tightens |
@@ -400,6 +439,7 @@ Controls use world X/Y axes. The camera can rotate independently.
 | Nonlinear defect | Mismatch between the convex predicted state and an independent nonlinear rollout |
 | Warm start | Shift the previous MPC solution forward to initialize the next solve |
 | Coast | Zero main-engine thrust with the engine still armed for automatic relight |
+| Launch-return | Autonomous vertical boost, ballistic coast, and landing on the origin pad |
 | Terminal control | Intentional low-altitude PD mode below the 7 m handoff |
 | TVC | Thrust-vector control through engine gimballing |
 

@@ -57,6 +57,16 @@ def test_fuel_consumption_matches_paper_equation() -> None:
   )
 
 
+def test_attached_stack_mass_is_inert_and_jettisonable() -> None:
+  controller = RocketController(attached_mass_kg=120_000.0)
+  assert controller.wet_mass_kg == pytest_approx(150_000.0)
+  controller.ignite()
+  controller.consume_fuel(0.5)
+  assert controller.attached_mass_kg == pytest_approx(120_000.0)
+  controller.attached_mass_kg = 0.0
+  assert controller.wet_mass_kg == pytest_approx(controller.stage_mass_kg)
+
+
 def test_engine_kill_jumps_directly_to_zero_and_requires_reset() -> None:
   controller = RocketController()
   controller.ignite()

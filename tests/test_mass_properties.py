@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from rocket_landing.mass_properties import RocketMassModel
+from rocket_landing.mass_properties import (
+  MassProperties,
+  RocketMassModel,
+  combine_axial_mass_properties,
+)
 from rocket_landing.mpc import MPCConfig, SixDofMPC
 from rocket_landing.sim import RocketSimulation
 
@@ -58,3 +62,23 @@ def test_mujoco_and_mpc_share_fuel_dependent_mass_properties() -> None:
   assert predicted.inertia_at_com_kgm2 == pytest.approx(
     installed.inertia_at_com_kgm2
   )
+
+
+def test_attached_upper_stack_shifts_com_and_increases_pitch_inertia() -> None:
+  primary = MassProperties(
+    mass_kg=400_000.0,
+    center_of_mass_body_m=np.zeros(3),
+    inertia_at_com_kgm2=np.array([60e6, 60e6, 1e6]),
+  )
+  combined = combine_axial_mass_properties(
+    primary,
+    attached_mass_kg=120_000.0,
+    attached_center_z_m=34.0,
+    attached_inertia_at_com_kgm2=np.array([9e6, 9e6, 0.2e6]),
+  )
+
+  assert combined.mass_kg == pytest.approx(520_000.0)
+  assert combined.center_of_mass_body_m[2] == pytest.approx(
+    120_000.0 * 34.0 / 520_000.0
+  )
+  assert combined.inertia_at_com_kgm2[0] > primary.inertia_at_com_kgm2[0]

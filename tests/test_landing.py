@@ -10,10 +10,17 @@ from rocket_landing.mpc import SixDofMPC
 from rocket_landing.sim import (
   AUTO_LAND_FUEL_CHECK_PERIOD_S,
   AUTO_LAND_FUEL_MARGIN,
+  FALCON9_ASCENT_ENGINE_COUNT,
+  FALCON9_ATTACHED_UPPER_STACK_MASS_KG,
+  FALCON9_FIRST_STAGE_PROPELLANT_KG,
+  FALCON9_LIFTOFF_MASS_KG,
+  FALCON9_TERMINAL_ENGINE_COUNT,
   LANDING_LEG_DEPLOYMENT_TIME_S,
   LANDING_STAGING_HEIGHT_M,
+  LAUNCH_RETURN_TARGET_APOGEE_M,
   MPC_TERMINAL_HANDOFF_HEIGHT_M,
   LandingPhase,
+  LaunchReturnPhase,
   ROCKET_LANDED_COM_Z_M,
   RocketSimulation,
 )
@@ -386,6 +393,123 @@ def test_full_throttle_launch_fuel_auto_lands_below_100kg_reserve() -> None:
   assert 0.0 < simulation.controller.fuel_mass_kg < 100.0
   assert mpc_attempts > 50
   assert accepted_mpc_attempts / mpc_attempts > 0.60
+
+
+def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
+  simulation = RocketSimulation()
+  assert simulation.start_launch_return()
+  assert simulation.controller.wet_mass_kg == pytest.approx(
+    FALCON9_LIFTOFF_MASS_KG
+  )
+  assert simulation.controller.fuel_mass_kg == pytest.approx(
+    FALCON9_FIRST_STAGE_PROPELLANT_KG
+  )
+  assert simulation.controller.attached_mass_kg == pytest.approx(
+    FALCON9_ATTACHED_UPPER_STACK_MASS_KG
+  )
+  assert simulation.active_engine_count == FALCON9_ASCENT_ENGINE_COUNT
+  assert simulation.upper_stage_attached
+  assert all(
+    simulation.model.geom_rgba[geom_id, 3] > 0.0
+    for geom_id in simulation.upper_stack_geom_ids
+  )
+
+  mission_phases = set()
+  landing_phases = set()
+  peak_height = 0.0
+  cutoff_fuel = None
+  first_return_started = False
+  for _ in range(110_000):
+    previous_mission_phase = simulation.launch_return_phase
+    simulation.step()
+    mission_phases.add(simulation.launch_return_phase)
+    landing_phases.add(simulation.landing_phase)
+    peak_height = max(
+      peak_height,
+      float(simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M),
+    )
+    if (
+      previous_mission_phase is LaunchReturnPhase.BOOST
+      and simulation.launch_return_phase is LaunchReturnPhase.COAST
+    ):
+      cutoff_fuel = simulation.controller.fuel_mass_kg
+      assert simulation.predicted_ballistic_apogee_height_m() == pytest.approx(
+        LAUNCH_RETURN_TARGET_APOGEE_M,
+        abs=30.0,
+      )
+      assert simulation.controller.engine_state is EngineState.COAST
+      assert not simulation.upper_stage_attached
+      assert simulation.controller.attached_mass_kg == 0.0
+      assert all(
+        simulation.model.geom_rgba[geom_id, 3] == 0.0
+        for geom_id in simulation.upper_stack_geom_ids
+      )
+    elif (
+      cutoff_fuel is not None
+      and not first_return_started
+      and simulation.launch_return_phase is LaunchReturnPhase.COAST
+    ):
+      assert simulation.controller.fuel_mass_kg == pytest.approx(
+        cutoff_fuel,
+        abs=5.0,
+      )
+    if simulation.launch_return_phase is LaunchReturnPhase.RETURN:
+      first_return_started = True
+    if simulation.launch_return_phase in (
+      LaunchReturnPhase.COMPLETE,
+      LaunchReturnPhase.ABORTED,
+    ):
+      break
+
+  assert mission_phases.issuperset(
+    {
+      LaunchReturnPhase.BOOST,
+      LaunchReturnPhase.COAST,
+      LaunchReturnPhase.RETURN,
+      LaunchReturnPhase.COMPLETE,
+    }
+  )
+  assert landing_phases.issuperset(
+    {LandingPhase.COAST, LandingPhase.DESCEND, LandingPhase.COMPLETE}
+  )
+  assert cutoff_fuel is not None and 78_000.0 < cutoff_fuel < 83_000.0
+  assert 129_000.0 < peak_height < 131_000.0
+  assert simulation.launch_return_phase is LaunchReturnPhase.COMPLETE
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+  assert simulation.controller.engine_state is EngineState.SHUTDOWN
+  assert 15_000.0 < simulation.controller.fuel_mass_kg < 30_000.0
+  assert simulation.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
+  assert simulation.landing_leg_deployment == pytest.approx(1.0)
+  assert abs(simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M) < 0.20
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.10
+
+  simulation.reset()
+  assert not simulation.full_stack_loadout
+  assert not simulation.upper_stage_attached
+  assert simulation.controller.wet_mass_kg == pytest.approx(30_000.0)
+
+
+def test_launch_return_requires_stationary_rocket_on_pad() -> None:
+  simulation = RocketSimulation()
+  simulation.data.qpos[0] = 1.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  assert not simulation.start_launch_return()
+
+  simulation.reset()
+  simulation.data.qvel[2] = 0.30
+  mujoco.mj_forward(simulation.model, simulation.data)
+  assert not simulation.start_launch_return()
+
+
+def test_launch_return_engine_kill_marks_mission_aborted() -> None:
+  simulation = RocketSimulation()
+  assert simulation.start_launch_return()
+  assert simulation.controller.kill_engine()
+
+  simulation.step()
+
+  assert simulation.launch_return_phase is LaunchReturnPhase.ABORTED
+  assert simulation.controller.engine_state is EngineState.SHUTDOWN
 
 
 def test_high_energy_landing_mpc_rejects_virtual_state_teleportation() -> None:

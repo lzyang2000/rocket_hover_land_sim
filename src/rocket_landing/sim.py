@@ -13,8 +13,17 @@ import glfw
 import mujoco
 import numpy as np
 
-from rocket_landing.controller import EngineState, RocketController
-from rocket_landing.mass_properties import MassProperties, RocketMassModel
+from rocket_landing.controller import (
+  EngineState,
+  RocketController,
+  ThrustLimits,
+)
+from rocket_landing.mass_properties import (
+  MassProperties,
+  PropellantTank,
+  RocketMassModel,
+  combine_axial_mass_properties,
+)
 from rocket_landing.mpc import (
   ANGULAR_VELOCITY,
   GIMBAL,
@@ -92,6 +101,43 @@ COAST_STOPPING_DISTANCE_FACTOR = 1.25
 COAST_FIXED_BURN_MARGIN_M = 6.0
 COAST_BURN_REFERENCE_DECELERATION_MPS2 = 4.0
 COAST_BURN_REFERENCE_TERMINAL_HEIGHT_M = 6.0
+STANDARD_GRAVITY_MPS2 = 9.80665
+LAUNCH_RETURN_TARGET_APOGEE_M = 130_000.0
+LAUNCH_RETURN_START_MAX_POSITION_ERROR_M = 0.50
+LAUNCH_RETURN_START_MAX_SPEED_MPS = 0.25
+FALCON9_LIFTOFF_MASS_KG = 549_054.0
+FALCON9_FIRST_STAGE_DRY_MASS_KG = 25_600.0
+FALCON9_FIRST_STAGE_PROPELLANT_KG = 395_700.0
+FALCON9_ATTACHED_UPPER_STACK_MASS_KG = (
+  FALCON9_LIFTOFF_MASS_KG
+  - FALCON9_FIRST_STAGE_DRY_MASS_KG
+  - FALCON9_FIRST_STAGE_PROPELLANT_KG
+)
+FALCON9_UPPER_STACK_CENTER_Z_M = 34.0
+FALCON9_UPPER_STACK_INERTIA_KGM2 = np.array(
+  [8_900_000.0, 8_900_000.0, 220_000.0]
+)
+FALCON9_FIRST_STAGE_INITIAL_INERTIA_KGM2 = (
+  60_000_000.0,
+  60_000_000.0,
+  1_000_000.0,
+)
+FALCON9_MERLIN_SEA_LEVEL_THRUST_N = 845_222.0
+FALCON9_MERLIN_VACUUM_THRUST_N = 914_000.0
+FALCON9_MERLIN_MIN_THROTTLE = 0.57
+FALCON9_ASCENT_ENGINE_COUNT = 9
+FALCON9_RETURN_ENGINE_COUNT = 3
+FALCON9_TERMINAL_ENGINE_COUNT = 1
+FALCON9_MIN_RETURN_PROPELLANT_KG = 70_000.0
+FALCON9_ASCENT_ISP_S = 282.0
+FALCON9_RETURN_ISP_S = 311.0
+FALCON9_GIMBAL_LIMIT_DEG = 6.0
+FALCON9_TERMINAL_ENGINE_SWITCH_NET_ACCEL_MPS2 = 4.0
+FALCON9_RETURN_RECOAST_MIN_HEIGHT_M = 0.20
+FALCON9_LEG_DEPLOY_HEIGHT_M = 1_000.0
+FALCON9_TERMINAL_GUIDANCE_HEIGHT_M = 200.0
+FALCON9_RETURN_RECOAST_SPEED_RATIO = 0.72
+FALCON9_RETURN_MIN_POWERED_SEGMENT_S = 0.0
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 ASYNC_MPC_MAX_ACCEPT_AGE_S = 0.35
@@ -143,7 +189,40 @@ GUI_PANEL_MARGIN = 22.0
 THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
-APP_TITLE = "MuJoCo Powered Descent Lab v0.9.24 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.0 - 6-DOF SCvx MPC"
+
+
+LANDING_THRUST_LIMITS = ThrustLimits()
+FALCON9_ASCENT_THRUST_LIMITS = ThrustLimits(
+  nominal_max_newtons=(
+    FALCON9_ASCENT_ENGINE_COUNT * FALCON9_MERLIN_SEA_LEVEL_THRUST_N
+  ),
+  min_throttle=FALCON9_MERLIN_MIN_THROTTLE,
+  max_throttle=1.0,
+  pointing_half_angle_deg=FALCON9_GIMBAL_LIMIT_DEG,
+  alpha_kg_per_newton_second=(
+    1.0 / (FALCON9_ASCENT_ISP_S * STANDARD_GRAVITY_MPS2)
+  ),
+)
+
+
+def falcon9_return_thrust_limits(engine_count: int) -> ThrustLimits:
+  """Return the equivalent centered thrust limits for a return cluster."""
+
+  if engine_count not in (
+    FALCON9_RETURN_ENGINE_COUNT,
+    FALCON9_TERMINAL_ENGINE_COUNT,
+  ):
+    raise ValueError("Return engine count must be one or three.")
+  return ThrustLimits(
+    nominal_max_newtons=engine_count * FALCON9_MERLIN_VACUUM_THRUST_N,
+    min_throttle=FALCON9_MERLIN_MIN_THROTTLE,
+    max_throttle=1.0,
+    pointing_half_angle_deg=FALCON9_GIMBAL_LIMIT_DEG,
+    alpha_kg_per_newton_second=(
+      1.0 / (FALCON9_RETURN_ISP_S * STANDARD_GRAVITY_MPS2)
+    ),
+  )
 
 
 class LandingPhase(Enum):
@@ -151,6 +230,15 @@ class LandingPhase(Enum):
   ALIGN = auto()
   COAST = auto()
   DESCEND = auto()
+  COMPLETE = auto()
+  ABORTED = auto()
+
+
+class LaunchReturnPhase(Enum):
+  INACTIVE = auto()
+  BOOST = auto()
+  COAST = auto()
+  RETURN = auto()
   COMPLETE = auto()
   ABORTED = auto()
 
@@ -174,9 +262,38 @@ class RocketSimulation:
     self.rocket_body_id = mujoco.mj_name2id(
       self.model, mujoco.mjtObj.mjOBJ_BODY, "rocket"
     )
-    self.flame_geom_id = mujoco.mj_name2id(
-      self.model, mujoco.mjtObj.mjOBJ_GEOM, "engine_flame"
+    flame_names = ["engine_flame"] + [
+      f"engine_flame_{index}" for index in range(1, 9)
+    ]
+    self.flame_geom_ids = [
+      mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+      for name in flame_names
+    ]
+    self.flame_geom_id = self.flame_geom_ids[0]
+    self.flame_base_positions_body = [
+      np.array(
+        [
+          self.model.geom_pos[geom_id, 0],
+          self.model.geom_pos[geom_id, 1],
+          FLAME_ORIGIN_BODY_Z_M,
+        ]
+      )
+      for geom_id in self.flame_geom_ids
+    ]
+    upper_stack_names = (
+      "upper_stage",
+      "upper_stage_skirt",
+      "payload_fairing_lower",
+      "payload_fairing_upper",
     )
+    self.upper_stack_geom_ids = [
+      mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+      for name in upper_stack_names
+    ]
+    self._upper_stack_visible_alpha = {
+      geom_id: float(self.model.geom_rgba[geom_id, 3])
+      for geom_id in self.upper_stack_geom_ids
+    }
     self.thrust_site_id = mujoco.mj_name2id(
       self.model, mujoco.mjtObj.mjOBJ_SITE, "thrust_origin"
     )
@@ -233,6 +350,11 @@ class RocketSimulation:
     self.initial_body_inertia = self.model.body_inertia[
       self.rocket_body_id
     ].copy()
+    self.full_stack_loadout = False
+    self.upper_stage_attached = False
+    self.active_engine_count = FALCON9_TERMINAL_ENGINE_COUNT
+    self.attached_mass_center_z_m = 0.0
+    self.attached_mass_inertia_kgm2 = np.zeros(3, dtype=float)
     self.mass_model = RocketMassModel(
       dry_mass_kg=self.controller.dry_mass_kg,
       initial_propellant_mass_kg=self.controller.initial_fuel_mass_kg,
@@ -296,6 +418,7 @@ class RocketSimulation:
     self.hover_target_position = np.zeros(3, dtype=float)
     self.hover_target_velocity = np.zeros(3, dtype=float)
     self.landing_phase = LandingPhase.INACTIVE
+    self.launch_return_phase = LaunchReturnPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
     self.landing_burn_from_coast = False
     self.landing_leg_deployment = 0.0
@@ -305,16 +428,18 @@ class RocketSimulation:
     self.fuel_takeover_active = False
     self.last_fuel_takeover_check_time = -math.inf
     self.last_estimated_landing_fuel_kg = 0.0
+    self.last_landing_ignition_time = -math.inf
     self.reset()
 
   def reset(self) -> None:
     self._invalidate_mpc_solution()
-    self.controller.reset()
+    self._configure_landing_loadout()
     mujoco.mj_resetData(self.model, self.data)
     self.hover_enabled = False
     self.hover_target_position = self.data.qpos[0:3].copy()
     self.hover_target_velocity[:] = 0.0
     self.landing_phase = LandingPhase.INACTIVE
+    self.launch_return_phase = LaunchReturnPhase.INACTIVE
     self.landing_staging_altitude = LANDING_STAGING_MIN_ALTITUDE_M
     self.landing_burn_from_coast = False
     self.landing_leg_deployment = 0.0
@@ -323,6 +448,7 @@ class RocketSimulation:
     self.fuel_takeover_active = False
     self.last_fuel_takeover_check_time = -math.inf
     self.last_estimated_landing_fuel_kg = 0.0
+    self.last_landing_ignition_time = -math.inf
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
     self.engine_gimbal_command_radians[:] = 0.0
@@ -331,10 +457,109 @@ class RocketSimulation:
     self.roll_control_torque_nm = 0.0
     self._set_landing_leg_deployment(0.0)
     self._set_launch_mount_enabled(True)
+    self._set_upper_stack_visible(False)
     self._update_model_mass(force=True)
     self.hover_target_position = self.center_of_mass_position_world()
     self._update_flame()
     mujoco.mj_forward(self.model, self.data)
+
+  def _landing_mass_model(self) -> RocketMassModel:
+    return RocketMassModel(
+      dry_mass_kg=21_000.0,
+      initial_propellant_mass_kg=9_000.0,
+      initial_inertia_kgm2=tuple(
+        float(value) for value in self.initial_body_inertia
+      ),
+    )
+
+  @staticmethod
+  def _falcon9_first_stage_mass_model() -> RocketMassModel:
+    return RocketMassModel(
+      dry_mass_kg=FALCON9_FIRST_STAGE_DRY_MASS_KG,
+      initial_propellant_mass_kg=FALCON9_FIRST_STAGE_PROPELLANT_KG,
+      initial_inertia_kgm2=FALCON9_FIRST_STAGE_INITIAL_INERTIA_KGM2,
+      tanks=(
+        PropellantTank(
+          name="LOX",
+          mass_fraction=0.72,
+          bottom_z_m=-4.90,
+          height_m=16.0,
+          radius_m=1.65,
+        ),
+        PropellantTank(
+          name="RP-1",
+          mass_fraction=0.28,
+          bottom_z_m=-14.0,
+          height_m=12.0,
+          radius_m=1.65,
+        ),
+      ),
+    )
+
+  def _rebuild_mpc_controller(self) -> None:
+    self._mpc_config = MPCConfig(
+      initial_mass_kg=self.mass_model.initial_mass_kg,
+      dry_mass_kg=self.controller.dry_mass_kg,
+      initial_inertia_kgm2=self.mass_model.initial_inertia_kgm2,
+      mass_model=self.mass_model,
+      engine_position_body_m=tuple(float(value) for value in ENGINE_POSITION_BODY),
+      alpha_kg_per_newton_second=(
+        self.controller.limits.alpha_kg_per_newton_second
+      ),
+      min_thrust_newtons=self.controller.limits.min_thrust_newtons,
+      max_thrust_newtons=self.controller.limits.max_thrust_newtons,
+      max_gimbal_radians=min(
+        LANDING_GIMBAL_LIMIT_RADIANS,
+        math.radians(self.controller.limits.pointing_half_angle_deg),
+      ),
+      max_roll_torque_nm=MAX_ROLL_CONTROL_TORQUE_NM,
+      minimum_com_height_m=(
+        ROCKET_LANDED_COM_Z_M
+        + self.mass_model.properties(self.controller.dry_mass_kg)
+        .center_of_mass_body_m[2]
+        - 0.10
+      ),
+      maximum_scaled_defect=0.20,
+    )
+    self.mpc = SixDofMPC(self._mpc_config) if self.enable_mpc else None
+
+  def _configure_landing_loadout(self) -> None:
+    self.controller.configure(
+      limits=LANDING_THRUST_LIMITS,
+      dry_mass_kg=21_000.0,
+      fuel_mass_kg=9_000.0,
+    )
+    self.mass_model = self._landing_mass_model()
+    self.full_stack_loadout = False
+    self.upper_stage_attached = False
+    self.active_engine_count = FALCON9_TERMINAL_ENGINE_COUNT
+    self.attached_mass_center_z_m = 0.0
+    self.attached_mass_inertia_kgm2 = np.zeros(3, dtype=float)
+    self._rebuild_mpc_controller()
+
+  def _configure_full_stack_loadout(self) -> None:
+    self.controller.configure(
+      limits=FALCON9_ASCENT_THRUST_LIMITS,
+      dry_mass_kg=FALCON9_FIRST_STAGE_DRY_MASS_KG,
+      fuel_mass_kg=FALCON9_FIRST_STAGE_PROPELLANT_KG,
+      attached_mass_kg=FALCON9_ATTACHED_UPPER_STACK_MASS_KG,
+    )
+    self.mass_model = self._falcon9_first_stage_mass_model()
+    self.full_stack_loadout = True
+    self.upper_stage_attached = True
+    self.active_engine_count = FALCON9_ASCENT_ENGINE_COUNT
+    self.attached_mass_center_z_m = FALCON9_UPPER_STACK_CENTER_Z_M
+    self.attached_mass_inertia_kgm2 = FALCON9_UPPER_STACK_INERTIA_KGM2.copy()
+    self._set_upper_stack_visible(True)
+    self.last_mass_update_time = -math.inf
+    self.last_applied_mass = math.nan
+    self._update_model_mass(force=True)
+
+  def _set_upper_stack_visible(self, visible: bool) -> None:
+    for geom_id in self.upper_stack_geom_ids:
+      self.model.geom_rgba[geom_id, 3] = (
+        self._upper_stack_visible_alpha[geom_id] if visible else 0.0
+      )
 
   def close(self) -> None:
     if self._mpc_executor is not None:
@@ -404,6 +629,22 @@ class RocketSimulation:
       LandingPhase.COAST,
       LandingPhase.DESCEND,
     )
+
+  @property
+  def launch_return_active(self) -> bool:
+    return self.launch_return_phase in (
+      LaunchReturnPhase.BOOST,
+      LaunchReturnPhase.COAST,
+      LaunchReturnPhase.RETURN,
+    )
+
+  def predicted_ballistic_apogee_height_m(self) -> float:
+    """Return pad-relative apogee if thrust went to zero at this instant."""
+
+    height = max(float(self.data.qpos[2] - LANDING_PAD_POSITION[2]), 0.0)
+    upward_speed = max(float(self.center_of_mass_velocity_world()[2]), 0.0)
+    gravity = abs(float(self.model.opt.gravity[2]))
+    return height + upward_speed * upward_speed / (2.0 * gravity)
 
   @property
   def terminal_controller_active(self) -> bool:
@@ -543,8 +784,14 @@ class RocketSimulation:
     ):
       self._set_launch_mount_enabled(False)
 
+    full_stack_final_approach = (
+      self.full_stack_loadout
+      and self.landing_phase is LandingPhase.DESCEND
+      and height <= FALCON9_LEG_DEPLOY_HEIGHT_M
+    )
     if (
       self.terminal_controller_active
+      or full_stack_final_approach
       or self.landing_phase is LandingPhase.COMPLETE
     ):
       self.landing_legs_deploy_commanded = True
@@ -570,28 +817,42 @@ class RocketSimulation:
   def current_mass_properties(self) -> MassProperties:
     """Return continuous mass properties at the controller's current fuel mass."""
 
-    return self.mass_model.properties(self.controller.wet_mass_kg)
+    return self._mass_properties_for_fuel(self.controller.fuel_mass_kg)
+
+  def _mass_properties_for_fuel(self, fuel_mass_kg: float) -> MassProperties:
+    stage_properties = self.mass_model.properties(
+      self.controller.dry_mass_kg + float(fuel_mass_kg)
+    )
+    return combine_axial_mass_properties(
+      stage_properties,
+      attached_mass_kg=self.controller.attached_mass_kg,
+      attached_center_z_m=self.attached_mass_center_z_m,
+      attached_inertia_at_com_kgm2=self.attached_mass_inertia_kgm2,
+    )
 
   def center_of_mass_offset_rate_body(self) -> np.ndarray:
     """Body-frame COM migration rate caused by current propellant flow."""
 
     if self.controller.engine_state is not EngineState.LIT:
       return np.zeros(3, dtype=float)
-    mass = self.controller.wet_mass_kg
-    if mass <= self.controller.dry_mass_kg:
+    fuel_mass = self.controller.fuel_mass_kg
+    if fuel_mass <= 0.0:
       return np.zeros(3, dtype=float)
-    lower_mass = max(mass - 1.0, self.controller.dry_mass_kg)
-    upper_mass = min(mass + 1.0, self.mass_model.initial_mass_kg)
-    if upper_mass <= lower_mass:
+    lower_fuel = max(fuel_mass - 1.0, 0.0)
+    upper_fuel = min(
+      fuel_mass + 1.0,
+      self.controller.initial_fuel_mass_kg,
+    )
+    if upper_fuel <= lower_fuel:
       return np.zeros(3, dtype=float)
-    lower_com = self.mass_model.properties(
-      lower_mass
+    lower_com = self._mass_properties_for_fuel(
+      lower_fuel
     ).center_of_mass_body_m
-    upper_com = self.mass_model.properties(
-      upper_mass
+    upper_com = self._mass_properties_for_fuel(
+      upper_fuel
     ).center_of_mass_body_m
     derivative_per_kg = (upper_com - lower_com) / (
-      upper_mass - lower_mass
+      upper_fuel - lower_fuel
     )
     mass_rate = -(
       self.controller.limits.alpha_kg_per_newton_second
@@ -689,26 +950,191 @@ class RocketSimulation:
     if fuel_takeover:
       self.fuel_takeover_triggered = True
     if fuel_takeover and self._direct_fuel_takeover_coast_eligible():
-      position = self.center_of_mass_position_world()
-      velocity = self.center_of_mass_velocity_world()
-      landed_position = self.landing_center_of_mass_position()
-      gravity = abs(float(self.model.opt.gravity[2]))
-      height = max(float(position[2] - landed_position[2]), 0.0)
-      ballistic_apex_height = height + (
-        max(float(velocity[2]), 0.0) ** 2 / (2.0 * gravity)
-      )
-      self.landing_staging_altitude = (
-        landed_position[2] + ballistic_apex_height
-      )
-      self.hover_target_position = landed_position.copy()
-      self.hover_target_position[2] += self.landing_burn_altitude_m(0.0)
-      self.controller.center_lateral()
-      if self.controller.begin_coast():
-        self.landing_phase = LandingPhase.COAST
-        return True
+      return self._begin_ballistic_landing_coast(fuel_takeover=True)
     self.landing_phase = LandingPhase.ALIGN
     self._update_hover_controller(force=True)
     return True
+
+  def _begin_ballistic_landing_coast(self, *, fuel_takeover: bool) -> bool:
+    """Cut thrust while armed and target a landing from the ballistic apex."""
+
+    if self.controller.engine_state is not EngineState.LIT:
+      return False
+    if not self.controller.begin_coast():
+      return False
+    self._invalidate_mpc_solution()
+    self._set_launch_mount_enabled(False)
+    landed_position = self.landing_center_of_mass_position()
+    self.landing_staging_altitude = (
+      landed_position[2] + self.predicted_ballistic_apogee_height_m()
+    )
+    self.hover_target_position = landed_position.copy()
+    self.hover_target_position[2] += self.landing_burn_altitude_m(0.0)
+    self.hover_target_velocity[:] = 0.0
+    self.hover_enabled = True
+    self.landing_phase = LandingPhase.COAST
+    self.landing_burn_from_coast = False
+    self.fuel_takeover_active = fuel_takeover
+    if fuel_takeover:
+      self.fuel_takeover_triggered = True
+    self.controller.center_lateral()
+    return True
+
+  def start_launch_return(self) -> bool:
+    """Start a full-stack boost, separation, coast, and booster return."""
+
+    if self.launch_return_active or self.landing_active or self.hover_enabled:
+      return False
+    if self.controller.engine_state is not EngineState.OFF:
+      return False
+    position = self.center_of_mass_position_world()
+    landed_position = self.landing_center_of_mass_position()
+    if (
+      np.linalg.norm(position - landed_position)
+      > LAUNCH_RETURN_START_MAX_POSITION_ERROR_M
+      or np.linalg.norm(self.center_of_mass_velocity_world())
+      > LAUNCH_RETURN_START_MAX_SPEED_MPS
+    ):
+      return False
+    self._configure_full_stack_loadout()
+    if not self.controller.ignite():
+      return False
+    self._invalidate_mpc_solution()
+    self.landing_phase = LandingPhase.INACTIVE
+    self.launch_return_phase = LaunchReturnPhase.BOOST
+    self.fuel_takeover_active = False
+    self.fuel_takeover_triggered = True
+    self.controller.throttle = self.controller.limits.max_throttle
+    self.controller.center_lateral()
+    return True
+
+  def _set_return_engine_count(self, engine_count: int) -> None:
+    if self.active_engine_count == engine_count:
+      return
+    self._invalidate_mpc_solution()
+    self.controller.set_limits(
+      falcon9_return_thrust_limits(engine_count),
+      preserve_thrust=True,
+    )
+    self.active_engine_count = engine_count
+    self._rebuild_mpc_controller()
+
+  def _separate_upper_stage(self) -> None:
+    """Jettison the lumped upper stack and configure the entry-burn cluster."""
+
+    if not self.upper_stage_attached:
+      return
+    self.controller.attached_mass_kg = 0.0
+    self.upper_stage_attached = False
+    self._set_upper_stack_visible(False)
+    self._set_return_engine_count(FALCON9_RETURN_ENGINE_COUNT)
+    self.last_mass_update_time = -math.inf
+    self.last_applied_mass = math.nan
+    self._update_model_mass(force=True)
+
+  def _maybe_switch_to_terminal_engine(self) -> None:
+    if (
+      not self.full_stack_loadout
+      or self.upper_stage_attached
+      or self.active_engine_count != FALCON9_RETURN_ENGINE_COUNT
+      or self.controller.engine_state is not EngineState.LIT
+    ):
+      return
+    one_engine_limit = falcon9_return_thrust_limits(
+      FALCON9_TERMINAL_ENGINE_COUNT
+    )
+    maximum_terminal_mass = one_engine_limit.max_thrust_newtons / (
+      abs(float(self.model.opt.gravity[2]))
+      + FALCON9_TERMINAL_ENGINE_SWITCH_NET_ACCEL_MPS2
+    )
+    gravity = abs(float(self.model.opt.gravity[2]))
+    height = max(float(self.data.qpos[2] - LANDING_PAD_POSITION[2]), 0.0)
+    downward_speed = max(-float(self.center_of_mass_velocity_world()[2]), 0.0)
+    one_engine_net_acceleration = max(
+      one_engine_limit.max_thrust_newtons / self.controller.stage_mass_kg
+      - gravity,
+      0.25,
+    )
+    one_engine_stopping_gate = (
+      COAST_STOPPING_DISTANCE_FACTOR
+      * max(
+        downward_speed**2 - COAST_TARGET_TOUCHDOWN_SPEED_MPS**2,
+        0.0,
+      )
+      / (2.0 * one_engine_net_acceleration)
+      + downward_speed * COAST_IGNITION_DELAY_S
+      + 0.5 * gravity * COAST_IGNITION_DELAY_S**2
+      + COAST_FIXED_BURN_MARGIN_M
+    )
+    if (
+      self.controller.stage_mass_kg <= maximum_terminal_mass
+      and height >= one_engine_stopping_gate
+    ):
+      self._set_return_engine_count(FALCON9_TERMINAL_ENGINE_COUNT)
+
+  def _maybe_reenter_ballistic_coast(self) -> None:
+    """Avoid wasting minimum thrust after a high-energy return over-brakes."""
+
+    if (
+      not self.full_stack_loadout
+      or self.landing_phase is not LandingPhase.DESCEND
+      or self.controller.engine_state is not EngineState.LIT
+      or self.data.time - self.last_landing_ignition_time
+      < FALCON9_RETURN_MIN_POWERED_SEGMENT_S
+    ):
+      return
+    height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
+    if height <= FALCON9_RETURN_RECOAST_MIN_HEIGHT_M:
+      return
+    if height <= FALCON9_TERMINAL_GUIDANCE_HEIGHT_M:
+      return
+    downward_speed = max(-float(self.center_of_mass_velocity_world()[2]), 0.0)
+    target_speed = self._descent_rate_mps()
+    if downward_speed >= FALCON9_RETURN_RECOAST_SPEED_RATIO * target_speed:
+      return
+    if self._begin_ballistic_landing_coast(fuel_takeover=False):
+      self.launch_return_phase = LaunchReturnPhase.COAST
+
+  def _update_launch_return_guidance(self) -> None:
+    if not self.launch_return_active:
+      return
+    if self.launch_return_phase is LaunchReturnPhase.BOOST:
+      if self.controller.engine_state is not EngineState.LIT:
+        self.launch_return_phase = LaunchReturnPhase.ABORTED
+        return
+      self.controller.throttle = self.controller.limits.max_throttle
+      self.controller.center_lateral()
+      fuel_safety_cutoff = (
+        self.controller.fuel_mass_kg <= FALCON9_MIN_RETURN_PROPELLANT_KG
+      )
+      if (
+        self.predicted_ballistic_apogee_height_m()
+        >= LAUNCH_RETURN_TARGET_APOGEE_M
+        or fuel_safety_cutoff
+      ):
+        self._separate_upper_stage()
+        if self._begin_ballistic_landing_coast(fuel_takeover=False):
+          self.launch_return_phase = LaunchReturnPhase.COAST
+        else:
+          self.launch_return_phase = LaunchReturnPhase.ABORTED
+      return
+    self._maybe_switch_to_terminal_engine()
+    self._maybe_reenter_ballistic_coast()
+    if self.landing_phase is LandingPhase.ABORTED:
+      self.launch_return_phase = LaunchReturnPhase.ABORTED
+    elif self.landing_phase is LandingPhase.COMPLETE:
+      self.launch_return_phase = LaunchReturnPhase.COMPLETE
+    elif (
+      self.landing_phase is LandingPhase.INACTIVE
+      or self.controller.engine_state
+      in (EngineState.SHUTDOWN, EngineState.FUEL_OUT)
+    ):
+      self.launch_return_phase = LaunchReturnPhase.ABORTED
+    elif (
+      self.launch_return_phase is LaunchReturnPhase.COAST
+      and self.landing_phase is LandingPhase.DESCEND
+    ):
+      self.launch_return_phase = LaunchReturnPhase.RETURN
 
   def cancel_landing(self) -> None:
     if self.landing_active:
@@ -946,14 +1372,24 @@ class RocketSimulation:
       speed * speed - target_speed_squared,
       0.0,
     ) / (2.0 * net_braking_acceleration)
+    full_stack_terminal = (
+      self.full_stack_loadout
+      and not self.upper_stage_attached
+      and self.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
+    )
+    stopping_factor = (
+      1.08 if full_stack_terminal else COAST_STOPPING_DISTANCE_FACTOR
+    )
+    ignition_delay = 0.20 if full_stack_terminal else COAST_IGNITION_DELAY_S
+    fixed_margin = 1.0 if full_stack_terminal else COAST_FIXED_BURN_MARGIN_M
     ignition_delay_distance = (
-      speed * COAST_IGNITION_DELAY_S
-      + 0.5 * gravity * COAST_IGNITION_DELAY_S ** 2
+      speed * ignition_delay
+      + 0.5 * gravity * ignition_delay ** 2
     )
     return (
-      COAST_STOPPING_DISTANCE_FACTOR * stopping_distance
+      stopping_factor * stopping_distance
       + ignition_delay_distance
-      + COAST_FIXED_BURN_MARGIN_M
+      + fixed_margin
     )
 
   def estimated_powered_descent_height_m(self, staging_height_m: float) -> float:
@@ -1056,6 +1492,7 @@ class RocketSimulation:
     self.hover_target_position = self.center_of_mass_position_world()
     self.hover_target_velocity = self.center_of_mass_velocity_world()
     self.controller.center_lateral()
+    self.last_landing_ignition_time = float(self.data.time)
     self.landing_burn_from_coast = True
     self.landing_phase = LandingPhase.DESCEND
     return True
@@ -1274,6 +1711,30 @@ class RocketSimulation:
     required_force = self.controller.wet_mass_kg * (
       desired_acceleration - self.model.opt.gravity
     )
+    full_stack_terminal = (
+      self.full_stack_loadout
+      and not self.upper_stage_attached
+      and self.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
+      and self.landing_phase is LandingPhase.DESCEND
+    )
+    body_height = max(
+      float(self.data.qpos[2] - LANDING_PAD_POSITION[2]),
+      0.0,
+    )
+    if full_stack_terminal and body_height <= FALCON9_TERMINAL_GUIDANCE_HEIGHT_M:
+      downward_speed = max(-float(self.data.qvel[2]), 0.0)
+      desired_net_deceleration = 1.03 * max(
+        (
+          downward_speed**2
+          - COAST_TARGET_TOUCHDOWN_SPEED_MPS**2
+        )
+        / (2.0 * max(body_height, 0.20)),
+        0.0,
+      )
+      required_force[2] = self.controller.wet_mass_kg * (
+        abs(float(self.model.opt.gravity[2]))
+        + desired_net_deceleration
+      )
 
     vertical_force = float(required_force[2])
     horizontal_force = required_force[0:2]
@@ -1295,6 +1756,15 @@ class RocketSimulation:
       else:
         self.controller.center_lateral()
       required_magnitude = vertical_force / max(math.cos(constrained_angle), 1e-6)
+
+    if (
+      full_stack_terminal
+      and body_height > 0.20
+      and required_magnitude < self.controller.limits.min_thrust_newtons
+    ):
+      if self._begin_ballistic_landing_coast(fuel_takeover=False):
+        self.launch_return_phase = LaunchReturnPhase.COAST
+      return
 
     self.controller.throttle = float(
       np.clip(
@@ -1713,6 +2183,11 @@ class RocketSimulation:
       self.disable_hover()
       return
     self._poll_mpc_result()
+    if self.full_stack_loadout:
+      self.mpc_using_pd = True
+      self._pd_hover_guidance()
+      self._allocate_attitude_control(self.controller.thrust_direction_world())
+      return
     if self.terminal_controller_active:
       self.mpc_using_pd = True
       self._pd_hover_guidance()
@@ -1984,7 +2459,7 @@ class RocketSimulation:
     ):
       return
 
-    mass_properties = self.mass_model.properties(current_mass)
+    mass_properties = self.current_mass_properties()
     self.model.body_mass[self.rocket_body_id] = mass_properties.mass_kg
     self.model.body_ipos[self.rocket_body_id] = (
       mass_properties.center_of_mass_body_m
@@ -2017,24 +2492,39 @@ class RocketSimulation:
     )
     half_length = 0.25 + 0.75 * normalized
     direction_body = gimbal_direction_body(self.engine_gimbal_radians)
-    self.model.geom_size[self.flame_geom_id, 1] = half_length
-    self.model.geom_pos[self.flame_geom_id, :] = (
-      ENGINE_POSITION_BODY - direction_body * half_length
-    )
     cross = np.cross(np.array([0.0, 0.0, 1.0]), direction_body)
     dot = float(np.clip(direction_body[2], -1.0, 1.0))
     scale = math.sqrt(max(2.0 * (1.0 + dot), 1e-12))
-    self.model.geom_quat[self.flame_geom_id, :] = (
+    flame_quaternion = np.array(
+      [
       scale / 2.0,
       cross[0] / scale,
       cross[1] / scale,
       cross[2] / scale,
+      ]
     )
-    self.model.geom_rgba[self.flame_geom_id, 3] = 0.58 if lit else 0.0
+    active_indices = {
+      FALCON9_TERMINAL_ENGINE_COUNT: {0},
+      FALCON9_RETURN_ENGINE_COUNT: {0, 1, 5},
+      FALCON9_ASCENT_ENGINE_COUNT: set(range(9)),
+    }.get(self.active_engine_count, {0})
+    for index, (geom_id, base_position) in enumerate(
+      zip(self.flame_geom_ids, self.flame_base_positions_body, strict=True)
+    ):
+      self.model.geom_size[geom_id, 1] = half_length
+      self.model.geom_pos[geom_id, :] = (
+        base_position - direction_body * half_length
+      )
+      self.model.geom_quat[geom_id, :] = flame_quaternion
+      self.model.geom_rgba[geom_id, 3] = (
+        0.58 if lit and index in active_indices else 0.0
+      )
 
   def step(self) -> None:
     self._check_fuel_reserve_takeover()
+    self._update_launch_return_guidance()
     self._update_landing_guidance()
+    self._update_launch_return_guidance()
     self._update_landing_legs()
     if self.landing_phase is LandingPhase.COAST:
       self.engine_gimbal_command_radians[:] = 0.0
@@ -2065,7 +2555,33 @@ class RocketSimulation:
   def telemetry_lines(self) -> tuple[str, ...]:
     position = self.data.qpos[0:3]
     velocity = self.data.qvel[0:3]
-    if self.landing_phase is LandingPhase.ALIGN:
+    if self.launch_return_phase is LaunchReturnPhase.BOOST:
+      mode_line = (
+        "MODE LAUNCH RETURN: BOOST    "
+        f"PREDICTED APOGEE {self.predicted_ballistic_apogee_height_m():.0f} / "
+        f"{LAUNCH_RETURN_TARGET_APOGEE_M:.0f} m"
+      )
+    elif (
+      self.launch_return_phase is LaunchReturnPhase.COAST
+      and self.landing_phase is LandingPhase.COAST
+    ):
+      mode_line = (
+        "MODE LAUNCH RETURN: BALLISTIC COAST    "
+        f"IGNITE BELOW {self.hover_target_position[2] - self.landing_center_of_mass_position()[2]:.1f} m"
+      )
+    elif (
+      self.launch_return_phase is LaunchReturnPhase.RETURN
+      and self.landing_phase is LandingPhase.DESCEND
+    ):
+      mode_line = (
+        "MODE LAUNCH RETURN: LANDING    "
+        f"TARGET VZ {self.hover_target_velocity[2]:.2f} m/s"
+      )
+    elif self.launch_return_phase is LaunchReturnPhase.COMPLETE:
+      mode_line = "MODE LAUNCH RETURN COMPLETE"
+    elif self.launch_return_phase is LaunchReturnPhase.ABORTED:
+      mode_line = "MODE LAUNCH RETURN ABORTED"
+    elif self.landing_phase is LandingPhase.ALIGN:
       mode_line = (
         "MODE AUTO LAND: FUEL RESERVE ALIGN"
         if self.fuel_takeover_active
@@ -2102,10 +2618,14 @@ class RocketSimulation:
       math.acos(float(np.clip(rotation[2, 2], -1.0, 1.0)))
     )
     gimbal_angle = math.degrees(float(np.linalg.norm(self.engine_gimbal_radians)))
-    if self.landing_phase is LandingPhase.COAST:
+    if self.launch_return_phase is LaunchReturnPhase.BOOST:
+      control_line = "CTRL AUTONOMOUS LAUNCH TVC"
+    elif self.landing_phase is LandingPhase.COAST:
       control_line = "CTRL BALLISTIC COAST: ENGINE ARMED"
     elif self.hover_enabled and self.terminal_controller_active:
       control_line = "CTRL 6-DOF TERMINAL"
+    elif self.hover_enabled and self.full_stack_loadout:
+      control_line = "CTRL FULL-STACK RETURN GUIDANCE"
     elif self.hover_enabled and self.enable_mpc:
       if self.mpc_using_pd:
         pd_detail = (
@@ -2134,9 +2654,15 @@ class RocketSimulation:
       leg_line = f"LEGS DEPLOYING {self.landing_leg_deployment * 100:.0f}%"
     else:
       leg_line = "LEGS STOWED"
+    engine_cluster_line = (
+      f"{self.active_engine_count} ENGINES"
+      if self.full_stack_loadout
+      else "1 ENGINE"
+    )
     return (
       (
         f"ENGINE {self.controller.engine_state.name}    "
+        f"{engine_cluster_line}    "
         f"THROTTLE {self.controller.throttle * 100:5.1f}%    "
         f"THRUST {self.controller.thrust_magnitude_newtons() / 1000:5.1f} kN"
       ),
@@ -2153,7 +2679,7 @@ class RocketSimulation:
         f"{leg_line}"
       ),
       "3-D arrow: plume direction, vehicle thrust is opposite",
-      "H hover | L auto-land | arrows altitude/throttle | WASD target/thrust | K kill | R reset",
+      "H hover | L auto-land | J launch-return | arrows altitude/throttle | WASD target/thrust | K kill | R reset",
     )
 
 
@@ -2314,9 +2840,10 @@ class RocketWindow:
       glfw.KEY_I: False,
       glfw.KEY_K: False,
       glfw.KEY_L: False,
+      glfw.KEY_J: False,
       glfw.KEY_R: False,
     }
-    self.status_message = "Press Up, I, or IGNITE ENGINE to start"
+    self.status_message = "Press J or LAUNCH + RETURN for an autonomous flight"
     self.status_until = time.monotonic() + 5.0
 
     glfw.set_key_callback(self.window, self._on_key)
@@ -2361,6 +2888,13 @@ class RocketWindow:
     return (panel_x, 140.0, panel_width, 46.0)
 
   @classmethod
+  def _launch_return_button_rect_window(
+    cls, window_width: int
+  ) -> tuple[float, float, float, float]:
+    panel_x, panel_width = cls._control_panel_rect_window(window_width)
+    return (panel_x, 196.0, panel_width, 42.0)
+
+  @classmethod
   def _direction_button_rects_window(
     cls, window_width: int,
   ) -> dict[str, tuple[float, float, float, float]]:
@@ -2371,10 +2905,10 @@ class RocketWindow:
     row_x = panel_x + 0.5 * (panel_width - row_width)
     center_x = panel_x + 0.5 * (panel_width - button_width)
     return {
-      "W": (center_x, 214.0, button_width, 42.0),
-      "A": (row_x, 264.0, button_width, 42.0),
-      "S": (row_x + button_width + gap, 264.0, button_width, 42.0),
-      "D": (row_x + 2.0 * (button_width + gap), 264.0, button_width, 42.0),
+      "W": (center_x, 246.0, button_width, 42.0),
+      "A": (row_x, 296.0, button_width, 42.0),
+      "S": (row_x + button_width + gap, 296.0, button_width, 42.0),
+      "D": (row_x + 2.0 * (button_width + gap), 296.0, button_width, 42.0),
     }
 
   @classmethod
@@ -2395,11 +2929,15 @@ class RocketWindow:
     self,
   ) -> tuple[str, tuple[float, float, float, float]]:
     simulation = self.simulation
+    if simulation.launch_return_phase is LaunchReturnPhase.BOOST:
+      return "LAUNCH ACTIVE", (0.52, 0.20, 0.68, 0.96)
     if simulation.landing_phase is LandingPhase.COAST:
       return "COAST ACTIVE", (0.08, 0.42, 0.70, 0.96)
     if simulation.hover_enabled:
       if simulation.terminal_controller_active:
         return "TERMINAL ACTIVE", (0.20, 0.32, 0.68, 0.96)
+      if simulation.full_stack_loadout:
+        return "RETURN ACTIVE", (0.52, 0.20, 0.68, 0.96)
       if (
         simulation.enable_mpc
         and not simulation.mpc_using_pd
@@ -2440,6 +2978,13 @@ class RocketWindow:
     cls, cursor_x: float, cursor_y: float, window_width: int
   ) -> bool:
     x, y, width, height = cls._land_button_rect_window(window_width)
+    return x <= cursor_x <= x + width and y <= cursor_y <= y + height
+
+  @classmethod
+  def _point_in_launch_return_button(
+    cls, cursor_x: float, cursor_y: float, window_width: int
+  ) -> bool:
+    x, y, width, height = cls._launch_return_button_rect_window(window_width)
     return x <= cursor_x <= x + width and y <= cursor_y <= y + height
 
   @classmethod
@@ -2493,7 +3038,11 @@ class RocketWindow:
     )
     owner = (
       "AUTO"
-      if self.simulation.hover_enabled or self.simulation.landing_active
+      if (
+        self.simulation.hover_enabled
+        or self.simulation.landing_active
+        or self.simulation.launch_return_active
+      )
       else "MANUAL"
     )
     return displayed_throttle, slider_fraction, owner
@@ -2529,9 +3078,14 @@ class RocketWindow:
 
   def _reset_flight(self) -> None:
     self.simulation.reset()
+    if hasattr(self, "camera"):
+      self.camera.distance = 72.0
     self._set_status("FLIGHT RESET - engine off, fuel full", duration=3.0)
 
   def _toggle_hover(self) -> None:
+    if self.simulation.launch_return_active:
+      self._set_status("Launch-return mission currently owns guidance")
+      return
     if self.simulation.hover_enabled:
       self.simulation.disable_hover()
       self._set_status("HOVER HOLD OFF - manual controls active")
@@ -2543,6 +3097,9 @@ class RocketWindow:
       self._set_status("Hover unavailable: engine has no fuel")
 
   def _toggle_landing(self) -> None:
+    if self.simulation.launch_return_active:
+      self._set_status("Launch-return mission already includes landing")
+      return
     if self.simulation.landing_active:
       self.simulation.cancel_landing()
       self._set_status("AUTO LAND CANCELED - holding current position")
@@ -2553,10 +3110,29 @@ class RocketWindow:
     else:
       self._set_status("Auto land unavailable: engine has no fuel")
 
+  def _toggle_launch_return(self) -> None:
+    if self.simulation.launch_return_active:
+      self._set_status("LAUNCH RETURN ACTIVE - K kills, R resets")
+    elif self.simulation.start_launch_return():
+      if hasattr(self, "camera"):
+        self.camera.distance = 104.0
+      self._set_status(
+        f"LAUNCH RETURN ON - target apogee {LAUNCH_RETURN_TARGET_APOGEE_M:.0f} m",
+        duration=4.0,
+      )
+    elif self.simulation.controller.engine_state is EngineState.SHUTDOWN:
+      self._set_status("Press R before starting launch-return")
+    else:
+      self._set_status("Launch-return requires a stationary rocket on the pad")
+
   def _set_manual_throttle_from_slider(
     self, cursor_x: float, window_width: int
   ) -> bool:
-    if self.simulation.landing_active or self.simulation.hover_enabled:
+    if (
+      self.simulation.landing_active
+      or self.simulation.hover_enabled
+      or self.simulation.launch_return_active
+    ):
       self._set_status("Autopilot currently owns the thrust slider")
       return False
     if self.simulation.controller.engine_state in (
@@ -2579,7 +3155,7 @@ class RocketWindow:
   def _apply_throttle_input(self, throttle_axis: float, dt: float) -> None:
     if throttle_axis == 0.0:
       return
-    if self.simulation.landing_active:
+    if self.simulation.landing_active or self.simulation.launch_return_active:
       return
     if self.simulation.hover_enabled:
       self.simulation.move_hover_target(
@@ -2610,6 +3186,7 @@ class RocketWindow:
       glfw.KEY_I: self._ignite,
       glfw.KEY_K: self._kill_engine,
       glfw.KEY_L: self._toggle_landing,
+      glfw.KEY_J: self._toggle_launch_return,
       glfw.KEY_R: self._reset_flight,
     }
     if key not in command_actions:
@@ -2651,6 +3228,11 @@ class RocketWindow:
       elif self._point_in_land_button(cursor_x, cursor_y, window_width):
         self.ui_pointer_captured = True
         self._toggle_landing()
+      elif self._point_in_launch_return_button(
+        cursor_x, cursor_y, window_width
+      ):
+        self.ui_pointer_captured = True
+        self._toggle_launch_return()
       else:
         direction_command = self._direction_command_for_point(
           cursor_x, cursor_y, window_width
@@ -2736,6 +3318,7 @@ class RocketWindow:
       glfw.KEY_I: self._ignite,
       glfw.KEY_K: self._kill_engine,
       glfw.KEY_L: self._toggle_landing,
+      glfw.KEY_J: self._toggle_launch_return,
       glfw.KEY_R: self._reset_flight,
     }
     for key, command in command_actions.items():
@@ -2757,7 +3340,7 @@ class RocketWindow:
     if target_norm > 1.0:
       lateral_target /= target_norm
 
-    if self.simulation.landing_active:
+    if self.simulation.landing_active or self.simulation.launch_return_active:
       pass
     elif self.simulation.hover_enabled:
       self.simulation.move_hover_target(
@@ -2868,6 +3451,44 @@ class RocketWindow:
       self.context,
     )
 
+    launch_x, launch_y, launch_width, launch_height = (
+      self._launch_return_button_rect_window(window_width)
+    )
+    launch_rect = mujoco.MjrRect(
+      int(launch_x * scale_x),
+      int((window_height - launch_y - launch_height) * scale_y),
+      int(launch_width * scale_x),
+      int(launch_height * scale_y),
+    )
+    mission_phase = self.simulation.launch_return_phase
+    if mission_phase is LaunchReturnPhase.BOOST:
+      launch_color = (0.52, 0.20, 0.68, 0.96)
+      launch_label = "RETURN: BOOST"
+    elif mission_phase is LaunchReturnPhase.COAST:
+      launch_color = (0.08, 0.42, 0.70, 0.96)
+      launch_label = "RETURN: COAST"
+    elif mission_phase is LaunchReturnPhase.RETURN:
+      launch_color = (0.78, 0.38, 0.02, 0.96)
+      launch_label = "RETURN: LANDING"
+    elif mission_phase is LaunchReturnPhase.COMPLETE:
+      launch_color = (0.08, 0.48, 0.18, 0.94)
+      launch_label = "RETURN COMPLETE"
+    elif mission_phase is LaunchReturnPhase.ABORTED:
+      launch_color = (0.58, 0.08, 0.06, 0.94)
+      launch_label = "RETURN ABORTED"
+    else:
+      launch_color = (0.28, 0.18, 0.42, 0.92)
+      launch_label = "LAUNCH + RETURN"
+    mujoco.mjr_rectangle(launch_rect, *launch_color)
+    mujoco.mjr_overlay(
+      self._overlay_font_for_label(launch_label, launch_rect.width),
+      mujoco.mjtGridPos.mjGRID_TOPLEFT,
+      launch_rect,
+      launch_label,
+      "",
+      self.context,
+    )
+
     hover_x, hover_y, hover_width, hover_height = self._hover_button_rect_window(
       window_width
     )
@@ -2942,7 +3563,9 @@ class RocketWindow:
       slider_rect.height,
     )
     autopilot_owns_thrust = (
-      self.simulation.hover_enabled or self.simulation.landing_active
+      self.simulation.hover_enabled
+      or self.simulation.landing_active
+      or self.simulation.launch_return_active
     )
     fill_color = (
       (0.04, 0.48, 0.78, 0.96)

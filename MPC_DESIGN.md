@@ -102,7 +102,7 @@ The principal tuning quantities have different jobs:
 
 ## 5. Receding-horizon operation
 
-Hover and auto-land provide a moving target state to the MPC. A target with nonzero velocity is expanded into a time-varying reference trajectory, with reference position advanced by `k * prediction_dt * target_velocity` at each prediction node. The optimizer runs at a lower rate than MuJoCo physics.
+Hover and ordinary auto-land provide a moving target state to the MPC. A target with nonzero velocity is expanded into a time-varying reference trajectory, with reference position advanced by `k * prediction_dt * target_velocity` at each prediction node. The 130 km full-stack mission deliberately remains outside this short-horizon landing MPC: BOOST uses the bounded nine-engine maximum with upright attitude control, separation is a discrete mass/configuration transition, COAST is ballistic, and return uses deterministic stopping-distance, attitude, and suicide-burn guidance. This avoids presenting a local landing optimizer as an ascent/entry trajectory planner. The optimizer runs at a lower rate than MuJoCo physics in the landing lab.
 
 The interactive launcher solves synchronously by default, so physics waits and the first optimized thrust, gimbal, and roll command corresponds to the sampled state and target. Optional `--async-mpc` mode instead uses SCvx as an outer trajectory-guidance layer. Each job carries its request simulation time and target sample. The optimized controls are nonlinearly rolled out, the returned trajectory is sampled at the current latency-compensated point for state-consistency checks, and a bounded preview reference is tracked by the deterministic 200 Hz controller. That inner loop alone owns the asynchronous actuator commands.
 

@@ -45,21 +45,59 @@ class RocketController:
     *,
     dry_mass_kg: float = 21_000.0,
     fuel_mass_kg: float = 9_000.0,
+    attached_mass_kg: float = 0.0,
   ) -> None:
     self.limits = limits or ThrustLimits()
     self.dry_mass_kg = dry_mass_kg
     self.initial_fuel_mass_kg = fuel_mass_kg
+    self.initial_attached_mass_kg = attached_mass_kg
     self.reset()
+
+  def configure(
+    self,
+    *,
+    limits: ThrustLimits,
+    dry_mass_kg: float,
+    fuel_mass_kg: float,
+    attached_mass_kg: float = 0.0,
+  ) -> None:
+    """Install a new vehicle loadout and return it to an unlit state."""
+
+    if dry_mass_kg <= 0.0 or fuel_mass_kg <= 0.0 or attached_mass_kg < 0.0:
+      raise ValueError("Vehicle masses must be positive and attached mass nonnegative.")
+    self.limits = limits
+    self.dry_mass_kg = float(dry_mass_kg)
+    self.initial_fuel_mass_kg = float(fuel_mass_kg)
+    self.initial_attached_mass_kg = float(attached_mass_kg)
+    self.reset()
+
+  def set_limits(
+    self, limits: ThrustLimits, *, preserve_thrust: bool = True
+  ) -> None:
+    """Change the active engine cluster without resetting flight state."""
+
+    previous_thrust = self.thrust_magnitude_newtons()
+    self.limits = limits
+    if preserve_thrust and previous_thrust > 0.0:
+      self.throttle = previous_thrust / limits.nominal_max_newtons
+    self.throttle = float(
+      np.clip(self.throttle, limits.min_throttle, limits.max_throttle)
+    )
 
   def reset(self) -> None:
     self.engine_state = EngineState.OFF
     self.throttle = self.limits.min_throttle
     self.lateral_command = np.zeros(2, dtype=float)
     self.fuel_mass_kg = self.initial_fuel_mass_kg
+    self.attached_mass_kg = self.initial_attached_mass_kg
+
+  @property
+  def stage_mass_kg(self) -> float:
+    return self.dry_mass_kg + self.fuel_mass_kg
 
   @property
   def wet_mass_kg(self) -> float:
-    return self.dry_mass_kg + self.fuel_mass_kg
+    return self.stage_mass_kg + self.attached_mass_kg
 
   def ignite(self) -> bool:
     """Ignite once. A killed engine cannot restart without resetting."""
