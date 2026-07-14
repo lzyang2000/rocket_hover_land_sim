@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum, auto
 import math
@@ -191,6 +192,8 @@ ASYNC_MPC_LANDING_NO_CLIMB_HEIGHT_M = 200.0
 ASYNC_MPC_LANDING_DESCENT_RECOVERY_GAIN = 0.50
 ASYNC_MPC_LANDING_MIN_DESCENT_RECOVERY_MPS2 = 0.50
 ASYNC_MPC_LANDING_MAX_DESCENT_RECOVERY_MPS2 = 3.0
+ASYNC_FLIGHT_LOG_PERIOD_S = 0.05
+ASYNC_FLIGHT_LOG_MAX_HEIGHT_M = 250.0
 HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
 HOVER_VELOCITY_KD = np.array([0.70, 0.70, 1.80])
 HOVER_TARGET_SPEED_MPS = 3.0
@@ -227,7 +230,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.12 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.13 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -298,10 +301,19 @@ class RocketSimulation:
     *,
     enable_mpc: bool = False,
     asynchronous_mpc: bool = False,
+    flight_log_path: Path | None = None,
   ) -> None:
     self.model = mujoco.MjModel.from_xml_path(str(model_path()))
     self.data = mujoco.MjData(self.model)
     self.controller = RocketController()
+    self.flight_log_path = (
+      Path(flight_log_path).expanduser().resolve()
+      if flight_log_path is not None
+      else None
+    )
+    self._flight_log_file = None
+    self._flight_log_writer = None
+    self._last_flight_log_time = -math.inf
     self.rocket_body_id = mujoco.mj_name2id(
       self.model, mujoco.mjtObj.mjOBJ_BODY, "rocket"
     )
@@ -497,6 +509,11 @@ class RocketSimulation:
     self._active_async_mpc_target_position = np.zeros(3, dtype=float)
     self._active_async_mpc_target_velocity = np.zeros(3, dtype=float)
     self.async_mpc_rejection_reason = ""
+    self.last_guidance_reference_position = np.full(3, np.nan)
+    self.last_guidance_reference_velocity = np.full(3, np.nan)
+    self.last_guidance_feedforward_acceleration = np.full(3, np.nan)
+    self.last_pd_desired_acceleration = np.full(3, np.nan)
+    self.async_descent_guard_active = False
     self.engine_gimbal_command_radians = np.zeros(2, dtype=float)
     self.engine_gimbal_radians = np.zeros(2, dtype=float)
     self.applied_throttle = 0.0
@@ -521,7 +538,14 @@ class RocketSimulation:
     self.last_estimated_landing_fuel_kg = 0.0
     self.last_landing_ignition_time = -math.inf
     self.last_landing_coast_time = -math.inf
+    self._last_flight_log_time = -math.inf
+    self.last_guidance_reference_position[:] = np.nan
+    self.last_guidance_reference_velocity[:] = np.nan
+    self.last_guidance_feedforward_acceleration[:] = np.nan
+    self.last_pd_desired_acceleration[:] = np.nan
+    self.async_descent_guard_active = False
     self.reset()
+    self._open_flight_log()
 
   def reset(self) -> None:
     self._invalidate_mpc_solution()
@@ -542,6 +566,12 @@ class RocketSimulation:
     self.last_estimated_landing_fuel_kg = 0.0
     self.last_landing_ignition_time = -math.inf
     self.last_landing_coast_time = -math.inf
+    self._last_flight_log_time = -math.inf
+    self.last_guidance_reference_position[:] = np.nan
+    self.last_guidance_reference_velocity[:] = np.nan
+    self.last_guidance_feedforward_acceleration[:] = np.nan
+    self.last_pd_desired_acceleration[:] = np.nan
+    self.async_descent_guard_active = False
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
     self.last_applied_upper_stage_mass = math.nan
@@ -682,10 +712,163 @@ class RocketSimulation:
     if not visible:
       self.model.geom_rgba[self.separated_upper_stage_flame_geom_id, 3] = 0.0
 
+  def _open_flight_log(self) -> None:
+    if self.flight_log_path is None:
+      return
+    self.flight_log_path.parent.mkdir(parents=True, exist_ok=True)
+    self._flight_log_file = self.flight_log_path.open(
+      "w", newline="", encoding="utf-8"
+    )
+    self._flight_log_writer = csv.DictWriter(
+      self._flight_log_file,
+      fieldnames=(
+        "wall_time_s",
+        "sim_time_s",
+        "owner",
+        "landing_phase",
+        "mission_phase",
+        "engine_state",
+        "engine_count",
+        "height_agl_m",
+        "x_m",
+        "y_m",
+        "z_com_m",
+        "vx_mps",
+        "vy_mps",
+        "vz_mps",
+        "target_x_m",
+        "target_y_m",
+        "target_z_m",
+        "target_vx_mps",
+        "target_vy_mps",
+        "target_vz_mps",
+        "reference_z_m",
+        "reference_vz_mps",
+        "position_error_z_m",
+        "velocity_error_z_mps",
+        "feedforward_az_mps2",
+        "desired_az_mps2",
+        "descent_guard_active",
+        "throttle_command",
+        "throttle_applied",
+        "thrust_kn",
+        "fuel_kg",
+        "mpc_using_pd",
+        "async_trajectory_active",
+        "async_trajectory_age_s",
+        "mpc_status",
+        "async_rejection_reason",
+        "landing_burn_from_coast",
+      ),
+    )
+    self._flight_log_writer.writeheader()
+    self._flight_log_file.flush()
+
+  def _flight_log_owner(self) -> str:
+    if self.full_stack_loadout and self.launch_return_active:
+      return "RETURN_PD"
+    if self.terminal_controller_active:
+      return "TERMINAL_PD"
+    if self.asynchronous_mpc:
+      return (
+        "ASYNC_MPC"
+        if self._active_async_mpc_result is not None and not self.mpc_using_pd
+        else "ASYNC_PD_FALLBACK"
+      )
+    return "SYNC_MPC" if not self.mpc_using_pd else "PD_FALLBACK"
+
+  def _write_flight_log_sample(self, *, force: bool = False) -> None:
+    if self._flight_log_writer is None or self._flight_log_file is None:
+      return
+    height_agl = float(self.data.qpos[2] - ROCKET_LANDED_COM_Z_M)
+    loggable_phase = self.landing_active or self.landing_phase in (
+      LandingPhase.COMPLETE,
+      LandingPhase.ABORTED,
+    )
+    if (
+      not force
+      and (
+        not loggable_phase
+        or height_agl > ASYNC_FLIGHT_LOG_MAX_HEIGHT_M
+      )
+    ):
+      return
+    if (
+      not force
+      and self.data.time - self._last_flight_log_time
+      < ASYNC_FLIGHT_LOG_PERIOD_S
+    ):
+      return
+    self._last_flight_log_time = float(self.data.time)
+    position = self.center_of_mass_position_world()
+    velocity = self.center_of_mass_velocity_world()
+    reference_position = self.last_guidance_reference_position
+    reference_velocity = self.last_guidance_reference_velocity
+    reference_z = float(reference_position[2])
+    reference_vz = float(reference_velocity[2])
+    trajectory_active = self._active_async_mpc_result is not None
+    trajectory_age = (
+      float(self.data.time - self._active_async_mpc_request_time)
+      if trajectory_active
+      else math.nan
+    )
+    mpc_status = (
+      self.last_mpc_result.status if self.last_mpc_result is not None else ""
+    )
+    self._flight_log_writer.writerow(
+      {
+        "wall_time_s": f"{time.time():.6f}",
+        "sim_time_s": f"{self.data.time:.6f}",
+        "owner": self._flight_log_owner(),
+        "landing_phase": self.landing_phase.name,
+        "mission_phase": self.launch_return_phase.name,
+        "engine_state": self.controller.engine_state.name,
+        "engine_count": self.active_engine_count,
+        "height_agl_m": f"{height_agl:.6f}",
+        "x_m": f"{position[0]:.6f}",
+        "y_m": f"{position[1]:.6f}",
+        "z_com_m": f"{position[2]:.6f}",
+        "vx_mps": f"{velocity[0]:.6f}",
+        "vy_mps": f"{velocity[1]:.6f}",
+        "vz_mps": f"{velocity[2]:.6f}",
+        "target_x_m": f"{self.hover_target_position[0]:.6f}",
+        "target_y_m": f"{self.hover_target_position[1]:.6f}",
+        "target_z_m": f"{self.hover_target_position[2]:.6f}",
+        "target_vx_mps": f"{self.hover_target_velocity[0]:.6f}",
+        "target_vy_mps": f"{self.hover_target_velocity[1]:.6f}",
+        "target_vz_mps": f"{self.hover_target_velocity[2]:.6f}",
+        "reference_z_m": f"{reference_z:.6f}",
+        "reference_vz_mps": f"{reference_vz:.6f}",
+        "position_error_z_m": f"{reference_z - position[2]:.6f}",
+        "velocity_error_z_mps": f"{reference_vz - velocity[2]:.6f}",
+        "feedforward_az_mps2": (
+          f"{self.last_guidance_feedforward_acceleration[2]:.6f}"
+        ),
+        "desired_az_mps2": f"{self.last_pd_desired_acceleration[2]:.6f}",
+        "descent_guard_active": int(self.async_descent_guard_active),
+        "throttle_command": f"{self.controller.throttle:.6f}",
+        "throttle_applied": f"{self.applied_throttle_fraction():.6f}",
+        "thrust_kn": f"{self.applied_thrust_magnitude_newtons() / 1000.0:.6f}",
+        "fuel_kg": f"{self.controller.fuel_mass_kg:.6f}",
+        "mpc_using_pd": int(self.mpc_using_pd),
+        "async_trajectory_active": int(trajectory_active),
+        "async_trajectory_age_s": f"{trajectory_age:.6f}",
+        "mpc_status": mpc_status,
+        "async_rejection_reason": self.async_mpc_rejection_reason,
+        "landing_burn_from_coast": int(self.landing_burn_from_coast),
+      }
+    )
+    self._flight_log_file.flush()
+
   def close(self) -> None:
     if self._mpc_executor is not None:
       self._mpc_executor.shutdown(wait=False, cancel_futures=True)
       self._mpc_executor = None
+    if self._flight_log_file is not None:
+      self._flight_log_file.flush()
+      self._flight_log_file.close()
+      self._flight_log_file = None
+      self._flight_log_writer = None
 
   def warm_up_mpc(self) -> None:
     """Compile and cache the MPC problem without changing the vehicle state."""
@@ -1991,6 +2174,10 @@ class RocketSimulation:
       if feedforward_acceleration is None
       else np.asarray(feedforward_acceleration, dtype=float)
     )
+    self.last_guidance_reference_position[:] = reference_position
+    self.last_guidance_reference_velocity[:] = reference_velocity
+    self.last_guidance_feedforward_acceleration[:] = reference_acceleration
+    self.async_descent_guard_active = False
     position_error = reference_position - position
     velocity_error = reference_velocity - velocity
     desired_acceleration = (
@@ -2010,6 +2197,7 @@ class RocketSimulation:
       and reference_velocity[2] < 0.0
       and velocity[2] >= reference_velocity[2]
     ):
+      self.async_descent_guard_active = True
       excess_vertical_speed = float(velocity[2] - reference_velocity[2])
       recovery_acceleration = min(
         ASYNC_MPC_LANDING_MAX_DESCENT_RECOVERY_MPS2,
@@ -2020,6 +2208,7 @@ class RocketSimulation:
         float(desired_acceleration[2]),
         -recovery_acceleration,
       )
+    self.last_pd_desired_acceleration[:] = desired_acceleration
     required_force = self.controller.wet_mass_kg * (
       desired_acceleration - self.model.opt.gravity
     )
@@ -3105,6 +3294,7 @@ class RocketSimulation:
     self._apply_control()
     self._update_flame()
     mujoco.mj_step(self.model, self.data)
+    self._write_flight_log_sample()
 
   def telemetry_lines(self) -> tuple[str, ...]:
     position = self.data.qpos[0:3]
@@ -4306,10 +4496,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
   args = build_argument_parser().parse_args()
+  flight_log_path = (
+    Path.cwd() / "async_final_approach_log.csv"
+    if args.async_mpc
+    else None
+  )
   simulation = RocketSimulation(
     enable_mpc=True,
     asynchronous_mpc=args.async_mpc,
+    flight_log_path=flight_log_path,
   )
+  if flight_log_path is not None:
+    print(f"Async final-approach log: {flight_log_path.resolve()}")
   simulation.warm_up_mpc()
   RocketWindow(simulation).run()
 

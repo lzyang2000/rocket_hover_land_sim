@@ -764,6 +764,30 @@ def test_async_landing_inner_loop_commands_downward_recovery_near_100m() -> None
     simulation.close()
 
 
+def test_async_flight_log_only_records_final_approach(tmp_path) -> None:
+  log_path = tmp_path / "async_final_approach_log.csv"
+  simulation = RocketSimulation(flight_log_path=log_path)
+  try:
+    simulation.landing_phase = LandingPhase.DESCEND
+    simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 300.0
+    mujoco.mj_forward(simulation.model, simulation.data)
+    simulation._write_flight_log_sample()
+
+    simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 100.0
+    simulation.data.qvel[2] = -5.0
+    simulation.hover_target_velocity[2] = -12.0
+    mujoco.mj_forward(simulation.model, simulation.data)
+    simulation._write_flight_log_sample()
+  finally:
+    simulation.close()
+
+  lines = log_path.read_text(encoding="utf-8").splitlines()
+  assert len(lines) == 2
+  assert "descent_guard_active" in lines[0]
+  assert "async_rejection_reason" in lines[0]
+  assert "DESCEND" in lines[1]
+
+
 def test_async_inner_loop_keeps_all_actuator_commands_bounded() -> None:
   simulation = RocketSimulation()
   simulation.controller.ignite()

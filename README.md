@@ -110,6 +110,8 @@ For responsive rendering and input while the optimizer runs in the background, u
 uv run rocket-landing --async-mpc
 ```
 
+Async mode automatically overwrites `async_final_approach_log.csv` in the directory where the command is launched. It records 20 Hz diagnostics only while landing guidance is active below 250 m, including phase, controller owner, actual and target vertical states, throttle command/response, MPC status, rejection reason, and descent-guard activity. Close the simulator normally to flush the final row.
+
 In asynchronous mode the optimizer supplies a timestamped nonlinear reference trajectory. A deterministic controller runs at every 5 ms MuJoCo step, compensates for solver latency, rejects stale or inconsistent predictions, shifts guidance toward the latest GUI target, and owns the actual bounded thrust, gimbal, and roll commands. Old raw MPC actuator commands are never applied after a delayed solve.
 
 ## Setup with a standard virtual environment
@@ -133,7 +135,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.12`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.13`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
