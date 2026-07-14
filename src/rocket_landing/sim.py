@@ -146,6 +146,8 @@ FALCON9_RETURN_MIN_POWERED_SEGMENT_S = 3.0
 FALCON9_RETURN_MIN_COAST_SEGMENT_S = 3.0
 FALCON9_RETURN_COAST_SAFETY_GATE_FACTOR = 0.85
 FALCON9_ENTRY_BURN_STOPPING_DISTANCE_FACTOR = 1.7
+FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE = 0.20
+FALCON9_BOOSTER_SEPARATION_IDLE_DURATION_S = 4.0
 FALCON9_GRAVITY_TURN_START_HEIGHT_M = 1_000.0
 FALCON9_GRAVITY_TURN_END_HEIGHT_M = 45_000.0
 FALCON9_GRAVITY_TURN_MAX_PITCH_DEG = 18.0
@@ -157,6 +159,8 @@ FALCON9_STAGE_SEPARATION_SPEED_MPS = 3.0
 FALCON9_UPPER_STAGE_THRUST_N = 981_000.0
 FALCON9_UPPER_STAGE_ISP_S = 348.0
 FALCON9_UPPER_STAGE_IGNITION_DELAY_S = 1.0
+FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DEG = 12.0
+FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DURATION_S = 4.0
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 ASYNC_MPC_MAX_ACCEPT_AGE_S = 0.35
@@ -209,7 +213,9 @@ THRUST_ARROW_MAX_LENGTH_M = 36.0
 THRUST_ARROW_MIN_WIDTH_M = 0.30
 THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.6 - 6-DOF SCvx MPC"
+DEFAULT_CAMERA_DISTANCE_M = 72.0
+LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.7 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -226,7 +232,11 @@ FALCON9_ASCENT_THRUST_LIMITS = ThrustLimits(
 )
 
 
-def falcon9_return_thrust_limits(engine_count: int) -> ThrustLimits:
+def falcon9_return_thrust_limits(
+  engine_count: int,
+  *,
+  min_throttle: float = FALCON9_MERLIN_MIN_THROTTLE,
+) -> ThrustLimits:
   """Return the equivalent centered thrust limits for a return cluster."""
 
   if engine_count not in (
@@ -236,7 +246,7 @@ def falcon9_return_thrust_limits(engine_count: int) -> ThrustLimits:
     raise ValueError("Return engine count must be one or three.")
   return ThrustLimits(
     nominal_max_newtons=engine_count * FALCON9_MERLIN_VACUUM_THRUST_N,
-    min_throttle=FALCON9_MERLIN_MIN_THROTTLE,
+    min_throttle=min_throttle,
     max_throttle=1.0,
     pointing_half_angle_deg=FALCON9_GIMBAL_LIMIT_DEG,
     alpha_kg_per_newton_second=(
@@ -411,8 +421,11 @@ class RocketSimulation:
     self.upper_stage_attached = False
     self.separated_upper_stage_active = False
     self.upper_stage_engine_active = False
+    self.upper_stage_throttle = 0.0
+    self.upper_stage_gimbal_radians = np.zeros(2, dtype=float)
     self.upper_stage_fuel_mass_kg = FALCON9_UPPER_STAGE_PROPELLANT_KG
     self.upper_stage_separation_time = math.inf
+    self.booster_separation_idle_until = -math.inf
     self.active_engine_count = FALCON9_TERMINAL_ENGINE_COUNT
     self.attached_mass_center_z_m = 0.0
     self.attached_mass_inertia_kgm2 = np.zeros(3, dtype=float)
@@ -606,8 +619,11 @@ class RocketSimulation:
     self.upper_stage_attached = False
     self.separated_upper_stage_active = False
     self.upper_stage_engine_active = False
+    self.upper_stage_throttle = 0.0
+    self.upper_stage_gimbal_radians[:] = 0.0
     self.upper_stage_fuel_mass_kg = FALCON9_UPPER_STAGE_PROPELLANT_KG
     self.upper_stage_separation_time = math.inf
+    self.booster_separation_idle_until = -math.inf
     self.active_engine_count = FALCON9_TERMINAL_ENGINE_COUNT
     self.attached_mass_center_z_m = 0.0
     self.attached_mass_inertia_kgm2 = np.zeros(3, dtype=float)
@@ -626,8 +642,11 @@ class RocketSimulation:
     self.upper_stage_attached = True
     self.separated_upper_stage_active = False
     self.upper_stage_engine_active = False
+    self.upper_stage_throttle = 0.0
+    self.upper_stage_gimbal_radians[:] = 0.0
     self.upper_stage_fuel_mass_kg = FALCON9_UPPER_STAGE_PROPELLANT_KG
     self.upper_stage_separation_time = math.inf
+    self.booster_separation_idle_until = -math.inf
     self.active_engine_count = FALCON9_ASCENT_ENGINE_COUNT
     self.attached_mass_center_z_m = FALCON9_UPPER_STACK_CENTER_Z_M
     self.attached_mass_inertia_kgm2 = FALCON9_UPPER_STACK_INERTIA_KGM2.copy()
@@ -1182,10 +1201,23 @@ class RocketSimulation:
     self.upper_stage_attached = False
     self.separated_upper_stage_active = True
     self.upper_stage_engine_active = False
+    self.upper_stage_throttle = 0.0
+    self.upper_stage_gimbal_radians[:] = 0.0
     self.upper_stage_separation_time = float(self.data.time)
     self._set_upper_stack_visible(False)
     self._set_separated_upper_stack_visible(True)
     self._set_return_engine_count(FALCON9_RETURN_ENGINE_COUNT)
+    self.controller.set_limits(
+      falcon9_return_thrust_limits(
+        FALCON9_RETURN_ENGINE_COUNT,
+        min_throttle=FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE,
+      ),
+      preserve_thrust=False,
+    )
+    self.controller.throttle = FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE
+    self.booster_separation_idle_until = (
+      self.data.time + FALCON9_BOOSTER_SEPARATION_IDLE_DURATION_S
+    )
     self.last_mass_update_time = -math.inf
     self.last_applied_mass = math.nan
     self._update_model_mass(force=True)
@@ -1285,11 +1317,22 @@ class RocketSimulation:
       aligned = attitude_error <= math.radians(
         FALCON9_BOOSTBACK_ATTITUDE_TOLERANCE_DEG
       )
-      self.controller.throttle = (
-        self.controller.limits.max_throttle
-        if aligned
-        else self.controller.limits.min_throttle
+      separation_idle_active = (
+        self.data.time < self.booster_separation_idle_until
       )
+      if separation_idle_active:
+        self.controller.throttle = FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE
+      else:
+        if self.controller.limits.min_throttle < FALCON9_MERLIN_MIN_THROTTLE:
+          self.controller.set_limits(
+            falcon9_return_thrust_limits(FALCON9_RETURN_ENGINE_COUNT),
+            preserve_thrust=False,
+          )
+        self.controller.throttle = (
+          self.controller.limits.max_throttle
+          if aligned
+          else self.controller.limits.min_throttle
+        )
       impact_x = float(self.predicted_ballistic_impact_position_xy()[0])
       boostback_complete = (
         aligned and impact_x <= FALCON9_BOOSTBACK_POWERED_IMPACT_TARGET_M
@@ -2649,9 +2692,14 @@ class RocketSimulation:
       upper_rotation = self.data.xmat[
         self.separated_upper_stage_body_id
       ].reshape(3, 3)
+      upper_thrust_body = (
+        self.upper_stage_throttle
+        * FALCON9_UPPER_STAGE_THRUST_N
+        * gimbal_direction_body(self.upper_stage_gimbal_radians)
+      )
       self.data.xfrc_applied[
         self.separated_upper_stage_body_id, 0:3
-      ] = upper_rotation[:, 2] * FALCON9_UPPER_STAGE_THRUST_N
+      ] = upper_rotation @ upper_thrust_body
     rotation = self.data.xmat[self.rocket_body_id].reshape(3, 3)
     if self.controller.engine_state is EngineState.LIT:
       thrust_body = (
@@ -2734,11 +2782,16 @@ class RocketSimulation:
         self.data.xpos[self.separated_upper_stage_body_id]
         + upper_rotation @ self.upper_stage_flame_origin_body
       )
+      upper_plume_direction = -upper_rotation @ gimbal_direction_body(
+        self.upper_stage_gimbal_radians
+      )
       upper_tip = (
         upper_origin
-        - upper_rotation[:, 2] * THRUST_ARROW_MAX_LENGTH_M
+        + upper_plume_direction
+        * THRUST_ARROW_MAX_LENGTH_M
+        * self.upper_stage_throttle
       )
-      arrows.append((upper_origin, upper_tip, 1.0))
+      arrows.append((upper_origin, upper_tip, self.upper_stage_throttle))
     return tuple(arrows)
 
   def _update_model_mass(self, *, force: bool = False) -> None:
@@ -2799,19 +2852,40 @@ class RocketSimulation:
   def _update_upper_stage_engine(self) -> None:
     if not self.separated_upper_stage_active:
       self.upper_stage_engine_active = False
+      self.upper_stage_throttle = 0.0
+      self.upper_stage_gimbal_radians[:] = 0.0
       return
     if (
       self.data.time - self.upper_stage_separation_time
       < FALCON9_UPPER_STAGE_IGNITION_DELAY_S
     ):
       self.upper_stage_engine_active = False
+      self.upper_stage_throttle = 0.0
+      self.upper_stage_gimbal_radians[:] = 0.0
       return
     if self.upper_stage_fuel_mass_kg <= 0.0:
       self.upper_stage_fuel_mass_kg = 0.0
       self.upper_stage_engine_active = False
+      self.upper_stage_throttle = 0.0
+      self.upper_stage_gimbal_radians[:] = 0.0
       return
     self.upper_stage_engine_active = True
-    fuel_flow_kg_per_second = FALCON9_UPPER_STAGE_THRUST_N / (
+    self.upper_stage_throttle = 1.0
+    powered_elapsed = (
+      self.data.time
+      - self.upper_stage_separation_time
+      - FALCON9_UPPER_STAGE_IGNITION_DELAY_S
+    )
+    if powered_elapsed < FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DURATION_S:
+      self.upper_stage_gimbal_radians[:] = (
+        0.0,
+        math.radians(FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DEG),
+      )
+    else:
+      self.upper_stage_gimbal_radians[:] = 0.0
+    fuel_flow_kg_per_second = (
+      self.upper_stage_throttle * FALCON9_UPPER_STAGE_THRUST_N
+    ) / (
       FALCON9_UPPER_STAGE_ISP_S * STANDARD_GRAVITY_MPS2
     )
     burned = min(
@@ -2855,6 +2929,28 @@ class RocketSimulation:
       )
     self.model.geom_rgba[self.separated_upper_stage_flame_geom_id, 3] = (
       0.68 if self.upper_stage_engine_active else 0.0
+    )
+    upper_half_length = 0.25 + 0.75 * self.upper_stage_throttle
+    upper_direction_body = gimbal_direction_body(
+      self.upper_stage_gimbal_radians
+    )
+    upper_cross = np.cross(
+      np.array([0.0, 0.0, 1.0]), upper_direction_body
+    )
+    upper_dot = float(np.clip(upper_direction_body[2], -1.0, 1.0))
+    upper_scale = math.sqrt(max(2.0 * (1.0 + upper_dot), 1e-12))
+    self.model.geom_size[self.separated_upper_stage_flame_geom_id, 1] = (
+      upper_half_length
+    )
+    self.model.geom_pos[self.separated_upper_stage_flame_geom_id, :] = (
+      self.upper_stage_flame_origin_body
+      - upper_direction_body * upper_half_length
+    )
+    self.model.geom_quat[self.separated_upper_stage_flame_geom_id, :] = (
+      upper_scale / 2.0,
+      upper_cross[0] / upper_scale,
+      upper_cross[1] / upper_scale,
+      upper_cross[2] / upper_scale,
     )
 
   def step(self) -> None:
@@ -3190,7 +3286,7 @@ class RocketWindow:
     mujoco.mjv_defaultOption(self.option)
     self.camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
     self.camera.trackbodyid = self.simulation.rocket_body_id
-    self.camera.distance = 72.0
+    self.camera.distance = DEFAULT_CAMERA_DISTANCE_M
     self.camera.azimuth = 135.0
     self.camera.elevation = -14.0
 
@@ -3440,7 +3536,7 @@ class RocketWindow:
   def _reset_flight(self) -> None:
     self.simulation.reset()
     if hasattr(self, "camera"):
-      self.camera.distance = 72.0
+      self.camera.distance = DEFAULT_CAMERA_DISTANCE_M
     self._set_status("FLIGHT RESET - engine off, fuel full", duration=3.0)
 
   def _toggle_hover(self) -> None:
@@ -3476,7 +3572,7 @@ class RocketWindow:
       self._set_status("LAUNCH RETURN ACTIVE - K kills, R resets")
     elif self.simulation.start_launch_return():
       if hasattr(self, "camera"):
-        self.camera.distance = 104.0
+        self.camera.distance = LAUNCH_RETURN_CAMERA_DISTANCE_M
       self._set_status(
         f"LAUNCH RETURN ON - target apogee {LAUNCH_RETURN_TARGET_APOGEE_M:.0f} m",
         duration=4.0,

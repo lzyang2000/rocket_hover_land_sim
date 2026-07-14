@@ -18,7 +18,15 @@ from rocket_landing.mpc import (
 )
 from rocket_landing.sim import (
   ASYNC_MPC_MAX_ACCEPT_AGE_S,
+  FALCON9_BOOSTER_SEPARATION_IDLE_DURATION_S,
+  FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE,
+  FALCON9_MERLIN_MIN_THROTTLE,
+  FALCON9_UPPER_STAGE_IGNITION_DELAY_S,
+  FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DEG,
+  FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DURATION_S,
+  FALCON9_UPPER_STAGE_THRUST_N,
   HOVER_TARGET_SPEED_MPS,
+  LAUNCH_RETURN_CAMERA_DISTANCE_M,
   LandingPhase,
   LaunchReturnPhase,
   MAX_ROLL_CONTROL_TORQUE_NM,
@@ -27,7 +35,6 @@ from rocket_landing.sim import (
   ROCKET_LANDED_COM_Z_M,
   ROLL_RCS_MAX_THRUSTER_FORCE_N,
   THRUST_ARROW_MAX_LENGTH_M,
-  FALCON9_UPPER_STAGE_THRUST_N,
   RocketSimulation,
   RocketWindow,
   build_argument_parser,
@@ -229,6 +236,11 @@ def test_upper_stage_thrust_arrow_follows_its_engine_bell() -> None:
   assert simulation.start_launch_return()
   simulation._separate_upper_stage()
   simulation.upper_stage_engine_active = True
+  simulation.upper_stage_throttle = 1.0
+  simulation.upper_stage_gimbal_radians[:] = (
+    0.0,
+    math.radians(FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DEG),
+  )
 
   upper_position = np.array([14.0, -8.0, 320.0])
   qpos_address = simulation.upper_stage_qpos_address
@@ -246,8 +258,11 @@ def test_upper_stage_thrust_arrow_follows_its_engine_bell() -> None:
     + upper_rotation @ simulation.upper_stage_flame_origin_body
   )
   assert upper_origin == pytest.approx(expected_origin)
+  expected_plume_direction = -upper_rotation @ gimbal_direction_body(
+    simulation.upper_stage_gimbal_radians
+  )
   assert upper_tip - upper_origin == pytest.approx(
-    -upper_rotation[:, 2] * THRUST_ARROW_MAX_LENGTH_M
+    expected_plume_direction * THRUST_ARROW_MAX_LENGTH_M
   )
   assert upper_fraction == pytest.approx(1.0)
 
@@ -260,6 +275,8 @@ def test_upper_stage_engine_adds_expected_velocity_over_ballistic_flight() -> No
     simulation._separate_upper_stage()
 
   powered.upper_stage_engine_active = True
+  powered.upper_stage_throttle = 1.0
+  powered.upper_stage_gimbal_radians[:] = 0.0
   ballistic.upper_stage_engine_active = False
   powered._apply_control()
   ballistic._apply_control()
@@ -287,6 +304,57 @@ def test_upper_stage_engine_adds_expected_velocity_over_ballistic_flight() -> No
     expected_thrust_acceleration * timestep,
     rel=1e-5,
     abs=1e-8,
+  )
+
+
+def test_stage_separation_uses_booster_idle_and_upper_lateral_gimbal() -> None:
+  simulation = RocketSimulation()
+  assert simulation.start_launch_return()
+  simulation._separate_upper_stage()
+
+  assert simulation.controller.limits.min_throttle == pytest.approx(
+    FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE
+  )
+  assert simulation.controller.throttle == pytest.approx(
+    FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE
+  )
+  assert (
+    simulation.booster_separation_idle_until - simulation.data.time
+    == pytest.approx(FALCON9_BOOSTER_SEPARATION_IDLE_DURATION_S)
+  )
+
+  simulation.data.time = (
+    simulation.upper_stage_separation_time
+    + FALCON9_UPPER_STAGE_IGNITION_DELAY_S
+    + 0.1
+  )
+  simulation._update_upper_stage_engine()
+  assert simulation.upper_stage_engine_active
+  assert simulation.upper_stage_throttle == pytest.approx(1.0)
+  assert simulation.upper_stage_gimbal_radians == pytest.approx(
+    (0.0, math.radians(FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DEG))
+  )
+
+  dof = simulation.upper_stage_dof_address
+  lateral_velocity_before = float(simulation.data.qvel[dof + 1])
+  simulation._apply_control()
+  mujoco.mj_step(simulation.model, simulation.data)
+  assert simulation.data.qvel[dof + 1] > lateral_velocity_before
+
+  simulation.data.time = (
+    simulation.upper_stage_separation_time
+    + FALCON9_UPPER_STAGE_IGNITION_DELAY_S
+    + FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DURATION_S
+    + 0.1
+  )
+  simulation._update_upper_stage_engine()
+  assert simulation.upper_stage_gimbal_radians == pytest.approx((0.0, 0.0))
+
+  simulation.launch_return_phase = LaunchReturnPhase.BOOSTBACK
+  simulation.data.time = simulation.booster_separation_idle_until + 0.1
+  simulation._update_launch_return_guidance()
+  assert simulation.controller.limits.min_throttle == pytest.approx(
+    FALCON9_MERLIN_MIN_THROTTLE
   )
 
 
@@ -976,3 +1044,19 @@ def test_short_key_events_trigger_mode_commands() -> None:
 
   window._on_key(None, glfw.KEY_J, 0, glfw.PRESS, 0)
   assert window.simulation.launch_return_phase is LaunchReturnPhase.BOOST
+
+
+def test_launch_return_pulls_camera_back_to_mission_distance() -> None:
+  window = RocketWindow.__new__(RocketWindow)
+  window.simulation = RocketSimulation()
+  window.camera = mujoco.MjvCamera()
+  mujoco.mjv_defaultCamera(window.camera)
+  window.status_message = ""
+  window.status_until = 0.0
+
+  window._toggle_launch_return()
+
+  assert window.simulation.launch_return_phase is LaunchReturnPhase.BOOST
+  assert window.camera.distance == pytest.approx(
+    LAUNCH_RETURN_CAMERA_DISTANCE_M
+  )

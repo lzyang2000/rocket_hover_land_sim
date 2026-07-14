@@ -131,7 +131,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.6`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.7`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -218,6 +218,8 @@ Press `J` or click `LAUNCH + RETURN` while the reset rocket is stationary on the
 → REENTRY/LANDING RELIGHT → 1-ENGINE TERMINAL BURN → COMPLETE
 ```
 
+Starting this mission automatically pulls the tracking camera back to three times the normal hover/landing distance so the full stack and early ascent remain in view. Reset restores the normal camera distance.
+
 The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 544,600 kg at liftoff, a 433,100 kg first stage (25,600 kg dry plus 407,500 kg propellant), a 111,500 kg second stage (4,000 kg dry plus 107,500 kg propellant), and nine visible Merlin-class first-stage engines. The fairing remains part of the visual teaching model but is not assigned additional payload mass beyond the stated second-stage wet mass. The vehicle rises vertically through 1 km, then follows a smooth pitch program that reaches 18° from vertical by 45 km. This creates a visible downrange ballistic arc instead of the previous straight-up trajectory. Guidance still predicts the zero-thrust apogee
 
 \[
@@ -226,7 +228,7 @@ h_a=h+\frac{\max(v_z,0)^2}{2g}
 
 and begins separation/boost-back when that prediction reaches 130 km. In the deterministic vacuum regression, separation occurs after about 114.6 s near 52.7 km altitude, 5.0 km downrange, +278 m/s horizontal speed, and +1,232 m/s vertical speed, with about 92.2 tonnes of first-stage propellant remaining.
 
-At separation, the second stage transfers to its own free MuJoCo body, inherits the launch pose and velocity, and receives a 3 m/s separation push. One second later its modeled 981 kN Merlin Vacuum-class engine ignites. The stage carries 107,500 kg of modeled propellant at 348 s specific impulse, loses mass as it burns, and receives continuous axial acceleration rather than disappearing or simply falling away. Its initial thrust-to-weight ratio is about 0.90, so while the teaching trajectory remains steep the engine first reduces the rate of gravitational deceleration; as propellant burns, thrust-to-weight rises above one.
+At separation, the second stage transfers to its own free MuJoCo body, inherits the launch pose and velocity, and receives a 3 m/s axial separation push. The booster holds its three-engine cluster at a special 20% clearance throttle for four seconds before restoring the normal 57% Merlin-class minimum. One second after release, the modeled 981 kN Merlin Vacuum-class upper-stage engine ignites at full throttle and gimbals 12° laterally for its first four powered seconds, creating visible sideways separation before recentering. The stage carries 107,500 kg of modeled propellant at 348 s specific impulse and loses mass as it burns. Its initial thrust-to-weight ratio is about 0.90, so while the teaching trajectory remains steep the engine first reduces the rate of gravitational deceleration; as propellant burns, thrust-to-weight rises above one.
 
 The booster remains within its first ignition event while three engines perform a 75° retrograde boost-back. It then shuts down and coasts. The mission permits exactly one relight—the second and final ignition—for the combined reentry and landing burn. There are no repeated `COAST`/`DESCEND` relight cycles. The three-engine entry gate uses a larger stopping-distance margin than the ordinary landing lab, moving ignition from the former roughly 61 km / 1,280 m/s condition into a regression window of 68–78 km and 1,120–1,240 m/s downward. The one-engine terminal gate remains independently tuned for touchdown. This earlier continuous burn trades about 4.2 tonnes of reserve for lower entry speed, leaving roughly 16.5 tonnes at landing in the deterministic vacuum run.
 
