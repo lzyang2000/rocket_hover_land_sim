@@ -97,6 +97,13 @@ COAST_ABORT_MAX_ANGULAR_RATE_RPS = 0.25
 COAST_ABORT_MAX_HORIZONTAL_ERROR_M = 2.75
 COAST_ABORT_MAX_HORIZONTAL_SPEED_MPS = 1.50
 COAST_TARGET_TOUCHDOWN_SPEED_MPS = 0.50
+FULL_STACK_TERMINAL_TARGET_SPEED_MPS = 0.10
+FULL_STACK_TERMINAL_BRAKING_FACTOR = 1.20
+FULL_STACK_TERMINAL_CUTOFF_HEIGHT_M = 1.0
+FULL_STACK_TERMINAL_CUTOFF_SPEED_MPS = 0.75
+TERMINAL_ARREST_CUTOFF_HEIGHT_M = 0.30
+TERMINAL_ARREST_MAX_HORIZONTAL_ERROR_M = 0.75
+TERMINAL_ARREST_MAX_HORIZONTAL_SPEED_MPS = 3.0
 COAST_IGNITION_DELAY_S = 0.45
 COAST_STOPPING_DISTANCE_FACTOR = 1.25
 COAST_FIXED_BURN_MARGIN_M = 6.0
@@ -216,7 +223,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.9 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.10 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -1398,10 +1405,10 @@ class RocketSimulation:
     if height > 5.0:
       return 3.0
     if height > 2.5:
-      return 1.5
+      return 1.0
     if height > 1.0:
-      return 0.6
-    return 0.25
+      return 0.35
+    return 0.10
 
   def _descent_rate_mps(self) -> float:
     height = float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
@@ -1899,16 +1906,23 @@ class RocketSimulation:
         self.hover_target_velocity[0:2] = desired_horizontal_velocity
       ready_for_cutoff = (
         height < (0.30 if self.fuel_takeover_active else 0.15)
-        and -0.50 <= body_velocity[2] <= 0.15
+        and -0.35 <= body_velocity[2] <= 0.15
         and horizontal_error < (1.00 if self.fuel_takeover_active else 0.50)
         and horizontal_speed < (0.60 if self.fuel_takeover_active else 0.30)
       )
+      descent_arrested_near_ground = (
+        height < TERMINAL_ARREST_CUTOFF_HEIGHT_M
+        and body_velocity[2] >= -0.35
+        and horizontal_error < TERMINAL_ARREST_MAX_HORIZONTAL_ERROR_M
+        and horizontal_speed < TERMINAL_ARREST_MAX_HORIZONTAL_SPEED_MPS
+      )
+      ready_for_cutoff = ready_for_cutoff or descent_arrested_near_ground
       if self.full_stack_loadout:
         ready_for_cutoff = (
-          height < 1.5
-          and -2.0 <= body_velocity[2] <= 0.50
-          and horizontal_error < 5.0
-          and horizontal_speed < 2.0
+          height < FULL_STACK_TERMINAL_CUTOFF_HEIGHT_M
+          and body_velocity[2] >= -FULL_STACK_TERMINAL_CUTOFF_SPEED_MPS
+          and horizontal_error < 10.0
+          and horizontal_speed < 5.0
         )
       if ready_for_cutoff:
         self._invalidate_mpc_solution()
@@ -1994,12 +2008,21 @@ class RocketSimulation:
     )
     if full_stack_return_burn:
       downward_speed = max(-float(self.data.qvel[2]), 0.0)
-      desired_net_deceleration = 1.08 * max(
+      throttle_lag_distance = (
+        downward_speed * THROTTLE_ACTUATOR_TIME_CONSTANT_S
+      )
+      available_braking_height = max(
+        body_height
+        - FULL_STACK_TERMINAL_CUTOFF_HEIGHT_M
+        - throttle_lag_distance,
+        0.20,
+      )
+      desired_net_deceleration = FULL_STACK_TERMINAL_BRAKING_FACTOR * max(
         (
           downward_speed**2
-          - COAST_TARGET_TOUCHDOWN_SPEED_MPS**2
+          - FULL_STACK_TERMINAL_TARGET_SPEED_MPS**2
         )
-        / (2.0 * max(body_height - 1.0, 0.20)),
+        / (2.0 * available_braking_height),
         0.0,
       )
       required_force[2] = self.controller.wet_mass_kg * (

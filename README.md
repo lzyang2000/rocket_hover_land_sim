@@ -133,7 +133,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.9`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.10`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -270,7 +270,7 @@ In the full-throttle-from-launch regression, fuel auto now takes over near 5.15 
 
 To prevent low-altitude hunting, the physical gimbal follows commands through an actuator lag and is limited to 3° below 5 m, 1.5° below 2.5 m, and 0.75° in the final meter. Very small terminal commands enter a 0.15° deadband.
 
-The engine normally cuts directly to zero once horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, vertical speed is between -0.50 and +0.15 m/s, and the rocket is within 15 cm of its landing body height. Fuel-reserve takeover uses an emergency envelope of 1.0 m, 0.60 m/s, and 30 cm so it does not spend its remaining reserve hovering for cosmetic pad precision. The legs and pad friction settle the residual motion.
+The engine normally cuts directly to zero once horizontal error is below 0.50 m, horizontal speed is below 0.30 m/s, vertical speed is between -0.35 and +0.15 m/s, and the rocket is within 15 cm of its landing body height. A second latch below 30 cm permits 0.75 m position error and up to 3 m/s lateral speed once descent has been arrested to at least -0.35 m/s; this prevents the precise gate from being missed and the minimum thrust lifting the vehicle again. The full-stack return uses a separate hover-slam cutoff: below 1 m, reaching at least -0.75 m/s latches permanent shutdown even with modest lateral error. Fuel-reserve takeover uses an emergency envelope of 1.0 m, 0.60 m/s, and 30 cm so it does not spend its remaining reserve hovering for cosmetic pad precision. The legs and pad friction settle the residual motion.
 
 ## Falcon 9-like dimensions and dynamics
 

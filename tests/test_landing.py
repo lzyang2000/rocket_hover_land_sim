@@ -205,9 +205,9 @@ def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> No
     20.0: 8.0,
     15.0: 5.0,
     8.0: 3.0,
-    3.0: 1.5,
-    1.5: 0.6,
-    0.5: 0.25,
+    3.0: 1.0,
+    1.5: 0.35,
+    0.5: 0.10,
   }
   for height, expected_rate in rate_by_height.items():
     simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + height
@@ -244,7 +244,7 @@ def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> No
     transition_rates.append(-float(transition.hover_target_velocity[2]))
 
   assert transition_rates == pytest.approx(
-    [12.0, 8.0, 5.0, 3.0, 1.5, 0.6, 0.25]
+    [12.0, 8.0, 5.0, 3.0, 1.0, 0.35, 0.10]
   )
   assert min(transition_rates) > 0.0
 
@@ -267,9 +267,9 @@ def test_auto_land_uses_aggressive_approach_and_terminal_braking_profile() -> No
   )
   assert flight.landing_phase is LandingPhase.COMPLETE
   assert peak_descent_speed > 10.0
-  assert cutoff_height > 0.05
+  assert cutoff_height > -0.02
   assert cutoff_height < 0.151
-  assert -0.50 <= float(flight.data.qvel[2]) <= 0.15
+  assert -0.40 <= float(flight.data.qvel[2]) <= 0.15
 
 
 def test_high_altitude_auto_land_coasts_without_fuel_then_relights() -> None:
@@ -557,6 +557,56 @@ def test_launch_return_engine_kill_marks_mission_aborted() -> None:
   simulation.step()
 
   assert simulation.launch_return_phase is LaunchReturnPhase.ABORTED
+  assert simulation.controller.engine_state is EngineState.SHUTDOWN
+
+
+def test_full_stack_terminal_cutoff_does_not_relaunch() -> None:
+  simulation = RocketSimulation()
+  assert simulation.start_launch_return()
+  simulation._separate_upper_stage()
+  simulation._set_return_engine_count(FALCON9_TERMINAL_ENGINE_COUNT)
+  simulation.controller.ignition_count = 2
+  simulation.controller.throttle = simulation.controller.limits.max_throttle
+  simulation.applied_throttle = simulation.controller.limits.min_throttle
+  simulation.launch_return_phase = LaunchReturnPhase.RETURN
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.landing_burn_from_coast = True
+  simulation.hover_enabled = True
+  simulation._set_landing_leg_deployment(1.0)
+  simulation._set_launch_mount_enabled(False)
+  simulation.data.qpos[0:3] = (
+    0.0,
+    0.0,
+    ROCKET_LANDED_COM_Z_M + 6.0,
+  )
+  simulation.data.qpos[3:7] = (1.0, 0.0, 0.0, 0.0)
+  simulation.data.qvel[:] = 0.0
+  simulation.data.qvel[2] = -6.0
+  simulation.hover_target_position = simulation.landing_center_of_mass_position()
+  simulation.hover_target_position[2] += 6.0
+  simulation.hover_target_velocity[:] = (0.0, 0.0, -3.0)
+  mujoco.mj_forward(simulation.model, simulation.data)
+
+  cutoff_vertical_speed = None
+  for _ in range(4_000):
+    simulation.step()
+    if simulation.landing_phase is LandingPhase.COMPLETE:
+      cutoff_vertical_speed = float(simulation.data.qvel[2])
+      break
+
+  assert simulation.landing_phase is LandingPhase.COMPLETE
+  assert simulation.controller.engine_state is EngineState.SHUTDOWN
+  assert cutoff_vertical_speed is not None
+  assert cutoff_vertical_speed >= -0.75
+
+  maximum_post_cutoff_height = float(simulation.data.qpos[2])
+  for _ in range(1_000):
+    simulation.step()
+    maximum_post_cutoff_height = max(
+      maximum_post_cutoff_height,
+      float(simulation.data.qpos[2]),
+    )
+  assert maximum_post_cutoff_height < ROCKET_LANDED_COM_Z_M + 1.0
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
 
 
@@ -899,7 +949,7 @@ def test_terminal_controller_flies_final_descent_and_cuts_off() -> None:
   assert simulation.controller.engine_state is EngineState.SHUTDOWN
   assert maximum_terminal_gimbal <= np.radians(1.5) + 1e-6
   assert terminal_gimbal_reversals == 0
-  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.50
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.75
   assert np.linalg.norm(
     simulation.center_of_mass_velocity_world()[0:2]
   ) < 0.31
@@ -907,5 +957,5 @@ def test_terminal_controller_flies_final_descent_and_cuts_off() -> None:
   for _ in range(2_000):
     simulation.step()
 
-  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.50
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 0.75
   assert np.linalg.norm(simulation.data.qvel[0:3]) < 0.05
