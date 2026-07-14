@@ -15,6 +15,7 @@ from rocket_landing.sim import (
   FALCON9_FIRST_STAGE_PROPELLANT_KG,
   FALCON9_LIFTOFF_MASS_KG,
   FALCON9_TERMINAL_ENGINE_COUNT,
+  FALCON9_UPPER_STAGE_PROPELLANT_KG,
   LANDING_LEG_DEPLOYMENT_TIME_S,
   LANDING_STAGING_HEIGHT_M,
   LAUNCH_RETURN_TARGET_APOGEE_M,
@@ -420,12 +421,18 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   cutoff_fuel = None
   boostback_fuel = None
   separated_upper_stage_velocity = None
+  upper_stage_engine_seen = False
   first_return_started = False
   for _ in range(110_000):
     previous_mission_phase = simulation.launch_return_phase
     simulation.step()
     mission_phases.add(simulation.launch_return_phase)
     landing_phases.add(simulation.landing_phase)
+    if simulation.upper_stage_engine_active:
+      upper_stage_engine_seen = True
+      assert simulation.upper_stage_fuel_mass_kg < (
+        FALCON9_UPPER_STAGE_PROPELLANT_KG
+      )
     peak_height = max(
       peak_height,
       float(simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M),
@@ -495,6 +502,7 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert cutoff_fuel is not None and 75_000.0 < cutoff_fuel < 79_000.0
   assert boostback_fuel is not None and 60_000.0 < boostback_fuel < 66_000.0
   assert separated_upper_stage_velocity is not None
+  assert upper_stage_engine_seen
   assert 145_000.0 < peak_height < 160_000.0
   assert simulation.launch_return_phase is LaunchReturnPhase.COMPLETE
   assert simulation.landing_phase is LandingPhase.COMPLETE
@@ -504,7 +512,9 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert simulation.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
   assert simulation.landing_leg_deployment == pytest.approx(1.0)
   assert 0.0 < simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M < 2.0
-  assert np.linalg.norm(simulation.data.qpos[0:2]) < 20.0
+  assert np.linalg.norm(simulation.data.qpos[0:2]) < 1.0
+  assert np.linalg.norm(simulation.data.qvel[0:2]) < 1.0
+  assert simulation._body_tilt_radians() < math.radians(1.0)
 
   simulation.reset()
   assert not simulation.full_stack_loadout

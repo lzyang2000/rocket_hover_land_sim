@@ -151,7 +151,7 @@ The autonomous launch-return button replaces that teaching loadout with an appro
 - three-engine and one-engine return clusters using 914 kN per engine;
 - 282 s ascent and 311 s return specific impulse assumptions.
 
-The upper stack is combined with the first-stage mass properties through the parallel-axis theorem until separation. At separation its mass is removed from the booster, while its geometry transfers to a second free MuJoCo body. That body inherits the launch pose, angular rate, and translational velocity plus a 3 m/s axial separation push, so it continues upward ballistically instead of disappearing. It has no modeled second-stage propulsion.
+The upper stack is combined with the first-stage mass properties through the parallel-axis theorem until separation. At separation its mass is removed from the booster, while its geometry transfers to a second free MuJoCo body. That body inherits the launch pose, angular rate, and translational velocity plus a 3 m/s axial separation push. After a one-second delay, a 981 kN axial engine ignites with 348 s specific impulse and 92,670 kg of propellant. Its mass and approximate inertia decrease during the burn, so it continues powered ascent instead of disappearing or passively falling away.
 
 The mass equation is
 
@@ -404,10 +404,10 @@ The engine model gives the full-stack mission exactly two ignition events: launc
 During the continuous reentry/landing burn, the vertical suicide-burn law uses downward speed $v$, height $h$, and target touchdown speed $v_t$ to request
 
 \[
-a_s=1.03\max\left(\frac{v^2-v_t^2}{2\max(h-1,0.2)},0\right),
+a_s=1.08\max\left(\frac{v^2-v_t^2}{2\max(h-1,0.2)},0\right),
 \]
 
-then commands $T=m(g+a_s)$ subject to the active engine bounds. Three engines are retained until this required thrust fits inside the one-engine interval; the controller then switches once to the center engine. Horizontal acceleration is generated from a finite-time pad-intercept law while respecting the 6° return gimbal limit. The deterministic regression reaches engine cutoff after about 481 s with approximately 17.1 tonnes of propellant remaining.
+then commands $T=m(g+a_s)$ subject to the active engine bounds. Three engines are retained until this required thrust fits inside the one-engine interval; the controller then switches once to the center engine. Horizontal acceleration uses a finite-time pad-intercept law whose time scale is twice the instantaneous vacuum fall time, avoiding the earlier over-aggressive lateral oscillation caused by ignoring powered-braking duration. The deterministic regression reaches engine cutoff after about 488 s with approximately 16.3 tonnes of propellant remaining, 0.16 m position error, 0.38 m/s lateral speed, and less than 0.5° tilt.
 
 This remains suborbital and simplified. A realistic launch would need atmospheric drag, max-Q and engine schedules, a much larger gravity turn toward orbital velocity, navigation over a rotating/curved Earth, continued upper-stage propulsion, and mission-specific boost-back/entry geometry.
 

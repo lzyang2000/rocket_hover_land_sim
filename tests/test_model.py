@@ -65,6 +65,18 @@ def test_mjcf_compiles_and_contains_free_rocket() -> None:
   assert model.nv == 12
 
 
+def test_fairing_ellipsoid_meets_lower_cylinder_at_its_equator() -> None:
+  model = mujoco.MjModel.from_xml_path(str(model_path()))
+  for lower_name, upper_name in (
+    ("payload_fairing_lower", "payload_fairing_upper"),
+    ("separated_payload_fairing_lower", "separated_payload_fairing_upper"),
+  ):
+    lower_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, lower_name)
+    upper_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, upper_name)
+    lower_top = model.geom_pos[lower_id, 2] + model.geom_size[lower_id, 1]
+    assert model.geom_pos[upper_id, 2] == pytest.approx(lower_top)
+
+
 def test_launcher_defaults_to_synchronous_mpc() -> None:
   parser = build_argument_parser()
 
@@ -783,7 +795,7 @@ def test_thrust_display_returns_to_zero_when_engine_is_not_lit() -> None:
   window.simulation.controller.throttle = 0.60
   displayed_throttle, slider_fraction, owner = window._thrust_display_values()
   assert displayed_throttle == pytest.approx(0.60)
-  assert slider_fraction == pytest.approx(2.0 / 3.0)
+  assert slider_fraction == pytest.approx(0.60)
   assert owner == "MANUAL"
 
   window.simulation.controller.kill_engine()

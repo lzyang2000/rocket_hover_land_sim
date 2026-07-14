@@ -356,7 +356,7 @@ Why does a launch vehicle pitch away from vertical, and how can the booster stil
 - The separated upper body preserves position, attitude, velocity, and angular rate; it does not disappear.
 - Boost-back changes the predicted impact point before the long engine-off coast.
 - High-altitude `COAST`/`DESCEND` chatter is impossible after the second ignition because no third relight is available.
-- This remains a suborbital vacuum demonstration, not an orbital gravity turn or powered upper-stage simulation.
+- The upper stage now demonstrates independent axial propulsion and mass depletion, but this remains a suborbital vacuum example rather than an orbital guidance simulation.
 
 ### Check your understanding
 
