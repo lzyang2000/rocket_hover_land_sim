@@ -138,6 +138,8 @@ class MPCConfig:
   virtual_control_weight: float = 300_000.0
   trust_region_weight: float = 1.0
   maximum_scaled_defect: float = 0.10
+  solver_max_iterations: int = 100
+  allow_refinement_recovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -607,6 +609,7 @@ class SixDofMPC:
     solution_controls = nominal_controls
     virtual_scaled = math.inf
     iterations_completed = 0
+    refinement_failure_status: str | None = None
 
     try:
       for iteration in range(self.config.successive_iterations):
@@ -642,10 +645,15 @@ class SixDofMPC:
             verbose=False,
             tol_gap_abs=1e-5,
             tol_feas=1e-5,
-            max_iter=100,
+            max_iter=self.config.solver_max_iterations,
           )
         status = str(self._problem.status)
         if status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+          if (
+            self.config.allow_refinement_recovery
+            and iterations_completed > 0
+          ):
+            refinement_failure_status = status
           break
         if self._x.value is None or self._u.value is None:
           status = "empty_solution"
@@ -669,7 +677,17 @@ class SixDofMPC:
         nominal_controls = solution_controls
         iterations_completed = iteration + 1
     except (cp.error.SolverError, ValueError, FloatingPointError) as error:
-      status = f"solver_error:{type(error).__name__}"
+      failure_status = f"solver_error:{type(error).__name__}"
+      if (
+        self.config.allow_refinement_recovery
+        and iterations_completed > 0
+      ):
+        refinement_failure_status = failure_status
+      else:
+        status = failure_status
+
+    if refinement_failure_status is not None:
+      status = f"recovered_after_{refinement_failure_status}"
 
     nonlinear_states = self.rollout(initial, solution_controls)
     scaled_defect = float(
@@ -682,7 +700,10 @@ class SixDofMPC:
       and np.all(np.isfinite(solution_states))
     )
     success = (
-      status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
+      (
+        status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)
+        or refinement_failure_status is not None
+      )
       and finite
       and scaled_defect <= self.config.maximum_scaled_defect
     )

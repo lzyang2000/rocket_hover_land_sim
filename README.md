@@ -25,7 +25,7 @@ flowchart LR
   G["User commands and auto-land state machine"] --> R["Position, velocity, and attitude references"]
   R --> M["SCvx MPC<br/>finite-horizon optimizer"]
   R --> P["200 Hz 6-DOF PD controller"]
-  M -->|"accepted command in sync mode<br/>accepted trajectory in async mode"| A["Thrust, gimbal, and roll-RCS allocation"]
+  M -->|"accepted command in ordinary sync mode<br/>accepted trajectory in async/full-stack mode"| A["Thrust, gimbal, and roll-RCS allocation"]
   M -->|"unavailable or rejected"| P
   P --> A
   A --> J["MuJoCo 6-DOF plant and contacts"]
@@ -135,7 +135,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.13`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.14`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -172,7 +172,7 @@ The mapping is in fixed world axes, not camera-relative axes. Rotating the camer
 
 ### Thrust slider
 
-The slider is always drawn on an absolute 0–100% scale. In the landing lab, clicking or dragging commands the nearest valid throttle from 20% to 80%; the unused ends of the bar remain visible so 80% no longer looks like 100%. Moving the slider automatically ignites an engine that is still off. Full-stack Merlin-class modes use their own 57–100% bounds on the same scale.
+The slider is always drawn on an absolute 0–100% scale. In the landing lab, clicking or dragging commands the nearest valid throttle from 20% to 80%; the unused ends of the bar remain visible so 80% no longer looks like 100%. Moving the slider automatically ignites an engine that is still off. Full-stack Merlin-class modes use their own approximate 40–100% bounds on the same scale.
 
 During hover and auto-land, the slider becomes read-only and changes color to indicate automatic ownership. Its knob follows the throttle actually commanded by guidance, including mass compensation and braking. During ballistic coast it moves to zero and reads `OFF`; the engine remains armed for an automatic relight.
 
@@ -232,7 +232,7 @@ h_a=h+\frac{\max(v_z,0)^2}{2g}
 
 and begins separation/boost-back when that prediction reaches 130 km. In the deterministic vacuum regression, separation occurs after about 114.6 s near 52.7 km altitude, 5.0 km downrange, +278 m/s horizontal speed, and +1,232 m/s vertical speed, with about 92.2 tonnes of first-stage propellant remaining.
 
-At separation, the second stage transfers to its own free MuJoCo body, inherits the launch pose and velocity, and receives a 3 m/s axial separation push. The booster holds its three-engine cluster at a special 20% clearance throttle for four seconds before restoring the normal 57% Merlin-class minimum. One second after release, the modeled 981 kN Merlin Vacuum-class upper-stage engine ignites at full throttle and gimbals 12° laterally for its first four powered seconds, creating visible sideways separation before recentering. The stage carries 107,500 kg of modeled propellant at 348 s specific impulse and loses mass as it burns. Its initial thrust-to-weight ratio is about 0.90, so while the teaching trajectory remains steep the engine first reduces the rate of gravitational deceleration; as propellant burns, thrust-to-weight rises above one.
+At separation, the second stage transfers to its own free MuJoCo body, inherits the launch pose and velocity, and receives a 3 m/s axial separation push. The booster holds its three-engine cluster at a special 20% clearance throttle for four seconds before restoring the approximate 40% Merlin-class minimum. One second after release, the modeled 981 kN Merlin Vacuum-class upper-stage engine ignites at full throttle and gimbals 12° laterally for its first four powered seconds, creating visible sideways separation before recentering. The stage carries 107,500 kg of modeled propellant at 348 s specific impulse and loses mass as it burns. Its initial thrust-to-weight ratio is about 0.90, so while the teaching trajectory remains steep the engine first reduces the rate of gravitational deceleration; as propellant burns, thrust-to-weight rises above one.
 
 The booster remains within its first ignition event while three engines perform a 75° retrograde boost-back. It then shuts down and coasts. The mission permits exactly one relight—the second and final ignition—for the combined reentry and landing burn. There are no repeated `COAST`/`DESCEND` relight cycles. The three-engine entry gate uses a larger stopping-distance margin than the ordinary landing lab, moving ignition from the former roughly 61 km / 1,280 m/s condition into a regression window of 68–78 km and 1,120–1,240 m/s downward. The one-engine terminal gate remains independently tuned for touchdown. This earlier continuous burn trades about 4.2 tonnes of reserve for lower entry speed, leaving roughly 16.5 tonnes at landing in the deterministic vacuum run.
 
@@ -313,7 +313,7 @@ Mass and thrust are both 30 times the original paper-example scale, preserving t
 | Total sea-level ascent thrust | approximately 7.607 MN |
 | Return engines | 3, then 1 |
 | Per-engine modeled vacuum thrust | 914 kN |
-| Modeled Merlin throttle interval | 57–100% |
+| Modeled Merlin throttle interval | approximately 40–100% |
 | Ascent/return specific impulse | 282 s / 311 s |
 | Second-stage propellant | 107,500 kg |
 | Upper-stage thrust / specific impulse | 981 kN / 348 s |
@@ -322,11 +322,13 @@ Mass and thrust are both 30 times the original paper-example scale, preserving t
 | Boost-back pitch | 75° retrograde from vertical |
 | Full-stack ignition budget | 2 total: launch and reentry/landing |
 
-The upper stack is inertially lumped into the launch vehicle until separation. At that event its visible geometry transfers to a second free rigid body with independent velocity, mass depletion, and axial propulsion. The nine- and three-engine forces on the booster are still applied as equivalent centered resultants at the engine section. The per-engine arrows make the selected physical cluster visible, but each arrow shares the cluster's common throttle and gimbal command. This captures total force, fuel flow, mass ratio, separation loss, downrange motion, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine allocation. The full-stack mission uses explicit deterministic energy/stopping-distance guidance rather than the short-horizon landing MPC; the GUI labels this intentional owner as `RETURN ACTIVE`, not as an MPC fallback.
+The upper stack is inertially lumped into the launch vehicle until separation. At that event its visible geometry transfers to a second free rigid body with independent velocity, mass depletion, and axial propulsion. The nine- and three-engine forces on the booster are still applied as equivalent centered resultants at the engine section. The per-engine arrows make the selected physical cluster visible, but each arrow shares the cluster's common throttle and gimbal command. This captures total force, fuel flow, mass ratio, separation loss, downrange motion, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine allocation.
+
+High-level mission events remain deterministic: ascent pitch, apogee cutoff, stage separation, boostback completion, ballistic coast, engine-count switching, ignition, and touchdown shutdown. During a powered return, however, the same 6-DOF SCvx MPC used by the landing lab now owns the optimized trajectory whenever a solution is accepted. Both modes track that nonlinear trajectory with the high-rate inner loop: synchronous mode solves from the current state before tracking, while async mode first compensates and validates worker latency. This avoids holding the long booster's non-minimum-phase first gimbal command for an entire MPC update interval. `PD ACTIVE` is used only while a solve is pending, after rejection, when MPC is disabled, or below the terminal handoff altitude. The ordinary landing lab hands off at 7 m; the full-stack return keeps MPC available down to 1 m so the fallback stopping law cannot arrest the booster several metres above the pad. Coast cannot use the current MPC because its convex model enforces a positive minimum thrust while the engine is lit.
 
 The tank intervals and RCS force level are transparent engineering assumptions, not published Block 5 specifications. A real Falcon 9 combines phase-dependent differential engine gimballing, aerodynamic grid-fin authority, and cold-gas attitude control; this single-engine landing model uses the opposed force pair as the explicit low-authority axial actuator.
 
-The 20–80% throttle interval applies to the landing lab and still comes from the paper-inspired educational model. The full-stack mission instead uses a 57–100% Merlin-class interval. Its reentry/landing ignition remains continuous through touchdown: the vertical law continually recomputes the thrust needed to spend the available stopping distance, switches from three engines to one when one-engine thrust becomes feasible, and never invents a third ignition. A real Falcon 9 still has different engine maps, relight limits, atmosphere, navigation, and mission-specific guidance.
+The 20–80% throttle interval applies to the landing lab and still comes from the paper-inspired educational model. The full-stack mission instead uses an approximate 40–100% Merlin-class interval. The exact Block 5 throttle map is not public; the 40% value follows Elon Musk's public statement that the minimum is approximately 40% of one Merlin ([source](https://twitter.com/elonmusk/status/728753234811060224)), rather than the earlier unsupported 57% assumption. Its reentry/landing ignition remains continuous through touchdown, switches from three engines to one when one-engine thrust becomes feasible, and never invents a third ignition. Accepted MPC commands are constrained by this nonzero floor; the PD fallback uses a stopping-distance law. A real Falcon 9 still has different engine maps, relight limits, atmosphere, navigation, and mission-specific guidance.
 
 ## Is it 6-DOF?
 

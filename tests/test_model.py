@@ -331,6 +331,7 @@ def test_upper_stage_engine_adds_expected_velocity_over_ballistic_flight() -> No
 
 
 def test_stage_separation_uses_booster_idle_and_upper_lateral_gimbal() -> None:
+  assert FALCON9_MERLIN_MIN_THROTTLE == pytest.approx(0.40)
   simulation = RocketSimulation()
   assert simulation.start_launch_return()
   simulation._separate_upper_stage()
@@ -378,6 +379,196 @@ def test_stage_separation_uses_booster_idle_and_upper_lateral_gimbal() -> None:
   simulation._update_launch_return_guidance()
   assert simulation.controller.limits.min_throttle == pytest.approx(
     FALCON9_MERLIN_MIN_THROTTLE
+  )
+
+
+def test_full_stack_powered_return_requests_and_applies_mpc() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  assert simulation.start_launch_return()
+  simulation._separate_upper_stage()
+  simulation._set_return_engine_count(1)
+  simulation.launch_return_phase = LaunchReturnPhase.RETURN
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.hover_enabled = True
+  simulation.data.qpos[0:3] = (
+    0.0,
+    0.0,
+    ROCKET_LANDED_COM_Z_M + 100.0,
+  )
+  simulation.data.qvel[:] = 0.0
+  simulation.data.qvel[2] = -10.0
+  simulation.hover_target_position = simulation.landing_center_of_mass_position()
+  simulation.hover_target_position[2] += 90.0
+  simulation.hover_target_velocity[:] = (0.0, 0.0, -12.0)
+  mujoco.mj_forward(simulation.model, simulation.data)
+  raw_control = np.array(
+    [
+      0.55 * simulation.controller.limits.nominal_max_newtons,
+      math.radians(1.0),
+      math.radians(-0.5),
+      750.0,
+    ]
+  )
+
+  class SuccessfulReturnMPC:
+    def reset(self) -> None:
+      pass
+
+    def solve(self, state, target, previous_control):
+      del state, target, previous_control
+      return _successful_prediction(simulation, control=raw_control)
+
+  simulation.mpc = SuccessfulReturnMPC()
+  simulation._invalidate_mpc_solution()
+  stopping_override = None
+
+  def record_guidance(**kwargs):
+    nonlocal stopping_override
+    stopping_override = kwargs["use_full_stack_stopping_law"]
+
+  simulation._pd_hover_guidance = record_guidance
+  simulation._update_hover_controller(force=True)
+
+  assert simulation.last_mpc_request_time == pytest.approx(simulation.data.time)
+  assert not simulation.mpc_using_pd
+  assert simulation._flight_log_owner() == "SYNC_MPC"
+  assert simulation._active_async_mpc_result is simulation.last_mpc_result
+  assert stopping_override is False
+
+
+def test_async_full_stack_mpc_tracking_does_not_use_pd_stopping_override() -> None:
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+  try:
+    assert simulation.start_launch_return()
+    simulation._separate_upper_stage()
+    simulation._set_return_engine_count(1)
+    simulation.launch_return_phase = LaunchReturnPhase.RETURN
+    simulation.landing_phase = LandingPhase.DESCEND
+    simulation.hover_enabled = True
+    simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 100.0
+    mujoco.mj_forward(simulation.model, simulation.data)
+    simulation.hover_target_position = simulation.center_of_mass_position_world()
+    simulation.hover_target_velocity[:] = (0.0, 0.0, -12.0)
+    simulation._active_async_mpc_result = _successful_prediction(
+      simulation,
+      node_count=simulation._mpc_config.horizon_steps + 1,
+    )
+    simulation._active_async_mpc_request_time = float(simulation.data.time)
+    simulation._active_async_mpc_target_position = (
+      simulation.hover_target_position.copy()
+    )
+    simulation._active_async_mpc_target_velocity = (
+      simulation.hover_target_velocity.copy()
+    )
+    stopping_override = None
+
+    def record_guidance(**kwargs):
+      nonlocal stopping_override
+      stopping_override = kwargs["use_full_stack_stopping_law"]
+
+    simulation._pd_hover_guidance = record_guidance
+
+    assert simulation._track_async_mpc_trajectory()
+    assert stopping_override is False
+    assert not simulation.mpc_using_pd
+  finally:
+    simulation.close()
+
+
+def test_real_full_stack_return_mpc_rejects_virtual_teleporting() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  assert simulation.start_launch_return()
+  simulation._separate_upper_stage()
+  simulation.controller.fuel_mass_kg = 14_750.0
+  simulation._set_return_engine_count(1)
+  simulation._update_model_mass(force=True)
+  simulation.launch_return_phase = LaunchReturnPhase.RETURN
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.landing_burn_from_coast = True
+  simulation.hover_enabled = True
+  simulation.data.qpos[0:3] = (
+    0.0,
+    0.0,
+    ROCKET_LANDED_COM_Z_M + 250.0,
+  )
+  simulation.data.qvel[:] = 0.0
+  simulation.data.qvel[2] = -26.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  requested_rate = simulation._descent_rate_mps()
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  simulation.hover_target_position[2] -= (
+    requested_rate * simulation.model.opt.timestep
+  )
+  simulation.hover_target_velocity[:] = (0.0, 0.0, -requested_rate)
+
+  simulation._request_mpc_solution()
+
+  assert simulation.last_mpc_result is not None
+  assert simulation._mpc_config.successive_iterations == 6
+  assert simulation._mpc_config.maximum_scaled_defect == pytest.approx(0.45)
+  assert simulation._mpc_config.virtual_control_weight == pytest.approx(
+    30_000_000.0
+  )
+  assert simulation.last_mpc_result.success
+  assert simulation.last_mpc_result.scaled_dynamics_defect <= (
+    simulation._mpc_config.maximum_scaled_defect
+  )
+  assert simulation.last_mpc_result.scaled_virtual_control < 1e-6
+  assert not simulation.mpc_using_pd
+  assert (
+    simulation.last_mpc_result.control[THRUST]
+    / simulation.controller.limits.nominal_max_newtons
+  ) == pytest.approx(
+    FALCON9_MERLIN_MIN_THROTTLE,
+    abs=1e-5,
+  )
+
+
+def test_full_stack_keeps_mpc_until_one_metre_terminal_handoff() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  assert simulation.start_launch_return()
+  simulation._separate_upper_stage()
+  simulation._set_return_engine_count(1)
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.hover_enabled = True
+
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 5.0
+  assert not simulation.terminal_controller_active
+
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 0.75
+  assert simulation.terminal_controller_active
+
+
+def test_full_stack_mpc_accepts_high_deceleration_iterate() -> None:
+  simulation = RocketSimulation(enable_mpc=True)
+  assert simulation.start_launch_return()
+  simulation._separate_upper_stage()
+  simulation.controller.fuel_mass_kg = 22_000.0
+  simulation._set_return_engine_count(1)
+  simulation._update_model_mass(force=True)
+  simulation.launch_return_phase = LaunchReturnPhase.RETURN
+  simulation.landing_phase = LandingPhase.DESCEND
+  simulation.landing_burn_from_coast = True
+  simulation.hover_enabled = True
+  simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 250.0
+  simulation.data.qvel[:] = 0.0
+  simulation.data.qvel[2] = -62.0
+  mujoco.mj_forward(simulation.model, simulation.data)
+  requested_rate = simulation._descent_rate_mps()
+  simulation.hover_target_position = simulation.center_of_mass_position_world()
+  simulation.hover_target_position[2] -= (
+    requested_rate * simulation.model.opt.timestep
+  )
+  simulation.hover_target_velocity[:] = (0.0, 0.0, -requested_rate)
+
+  simulation._request_mpc_solution()
+
+  assert simulation.last_mpc_result is not None
+  assert simulation.last_mpc_result.success
+  assert simulation.last_mpc_result.scaled_dynamics_defect <= 0.45
+  assert simulation.last_mpc_result.control[THRUST] == pytest.approx(
+    simulation.controller.limits.max_thrust_newtons,
+    rel=1e-5,
   )
 
 

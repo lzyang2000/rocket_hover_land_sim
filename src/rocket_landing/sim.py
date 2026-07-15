@@ -71,6 +71,7 @@ LANDING_DESCENT_CAPTURE_HORIZONTAL_SPEED_MPS = 1.0
 LANDING_DESCENT_CAPTURE_ALTITUDE_ERROR_M = 2.0
 LANDING_DESCENT_CAPTURE_VERTICAL_SPEED_MPS = 1.5
 MPC_TERMINAL_HANDOFF_HEIGHT_M = 7.0
+FALCON9_MPC_TERMINAL_HANDOFF_HEIGHT_M = 1.0
 AUTO_LAND_FUEL_MARGIN = 1.05
 AUTO_LAND_FUEL_CHECK_PERIOD_S = 0.25
 AUTO_LAND_TAKEOVER_MIN_HEIGHT_M = 0.15
@@ -138,7 +139,7 @@ FALCON9_FIRST_STAGE_INITIAL_INERTIA_KGM2 = (
 )
 FALCON9_MERLIN_SEA_LEVEL_THRUST_N = 845_222.0
 FALCON9_MERLIN_VACUUM_THRUST_N = 914_000.0
-FALCON9_MERLIN_MIN_THROTTLE = 0.57
+FALCON9_MERLIN_MIN_THROTTLE = 0.40
 FALCON9_ASCENT_ENGINE_COUNT = 9
 FALCON9_RETURN_ENGINE_COUNT = 3
 FALCON9_TERMINAL_ENGINE_COUNT = 1
@@ -146,6 +147,7 @@ FALCON9_MIN_RETURN_PROPELLANT_KG = 45_000.0
 FALCON9_ASCENT_ISP_S = 282.0
 FALCON9_RETURN_ISP_S = 311.0
 FALCON9_GIMBAL_LIMIT_DEG = 6.0
+FALCON9_MPC_VIRTUAL_CONTROL_WEIGHT = 30_000_000.0
 FALCON9_RETURN_RECOAST_MIN_HEIGHT_M = 0.20
 FALCON9_LEG_DEPLOY_HEIGHT_M = 1_000.0
 FALCON9_TERMINAL_GUIDANCE_HEIGHT_M = 200.0
@@ -173,6 +175,7 @@ FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DURATION_S = 4.0
 MASS_UPDATE_PERIOD_S = 0.10
 MPC_UPDATE_PERIOD_S = 0.30
 ASYNC_MPC_MAX_ACCEPT_AGE_S = 0.35
+ASYNC_MPC_MAX_SCALED_DEFECT = 0.20
 ASYNC_MPC_MAX_POSITION_MISMATCH_M = 2.0
 ASYNC_MPC_MAX_VELOCITY_MISMATCH_MPS = 2.5
 ASYNC_MPC_MAX_ATTITUDE_MISMATCH_RADIANS = math.radians(15.0)
@@ -189,9 +192,9 @@ ASYNC_MPC_LANDING_VELOCITY_BLEND = 1.0
 ASYNC_MPC_HOVER_POSITION_GAIN_SCALE = 1.50
 ASYNC_MPC_LANDING_POSITION_GAIN_SCALE = 1.0
 ASYNC_MPC_LANDING_NO_CLIMB_HEIGHT_M = 200.0
-ASYNC_MPC_LANDING_DESCENT_RECOVERY_GAIN = 0.50
-ASYNC_MPC_LANDING_MIN_DESCENT_RECOVERY_MPS2 = 0.50
-ASYNC_MPC_LANDING_MAX_DESCENT_RECOVERY_MPS2 = 3.0
+LANDING_DESCENT_RECOVERY_GAIN = 0.50
+LANDING_MIN_DESCENT_RECOVERY_MPS2 = 0.50
+LANDING_MAX_DESCENT_RECOVERY_MPS2 = 3.0
 ASYNC_FLIGHT_LOG_PERIOD_S = 0.05
 ASYNC_FLIGHT_LOG_MAX_HEIGHT_M = 250.0
 HOVER_POSITION_KP = np.array([0.12, 0.12, 0.80])
@@ -230,7 +233,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.13 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.14 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -642,13 +645,28 @@ class RocketSimulation:
         math.radians(self.controller.limits.pointing_half_angle_deg),
       ),
       max_roll_torque_nm=MAX_ROLL_CONTROL_TORQUE_NM,
+      virtual_control_weight=(
+        FALCON9_MPC_VIRTUAL_CONTROL_WEIGHT
+        if self.full_stack_loadout
+        else 300_000.0
+      ),
+      solver_max_iterations=200 if self.full_stack_loadout else 100,
+      allow_refinement_recovery=self.full_stack_loadout,
+      successive_iterations=(
+        6
+        if (
+          self.full_stack_loadout
+          and self.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
+        )
+        else 3
+      ),
       minimum_com_height_m=(
         ROCKET_LANDED_COM_Z_M
         + self.mass_model.properties(self.controller.dry_mass_kg)
         .center_of_mass_body_m[2]
         - 0.10
       ),
-      maximum_scaled_defect=0.20,
+      maximum_scaled_defect=0.45 if self.full_stack_loadout else 0.20,
     )
     self.mpc = SixDofMPC(self._mpc_config) if self.enable_mpc else None
 
@@ -765,8 +783,6 @@ class RocketSimulation:
     self._flight_log_file.flush()
 
   def _flight_log_owner(self) -> str:
-    if self.full_stack_loadout and self.launch_return_active:
-      return "RETURN_PD"
     if self.terminal_controller_active:
       return "TERMINAL_PD"
     if self.asynchronous_mpc:
@@ -972,11 +988,19 @@ class RocketSimulation:
     )
 
   @property
+  def terminal_handoff_height_m(self) -> float:
+    return (
+      FALCON9_MPC_TERMINAL_HANDOFF_HEIGHT_M
+      if self.full_stack_loadout
+      else MPC_TERMINAL_HANDOFF_HEIGHT_M
+    )
+
+  @property
   def terminal_controller_active(self) -> bool:
     return (
       self.landing_phase is LandingPhase.DESCEND
       and float(self.data.qpos[2] - LANDING_PAD_POSITION[2])
-      <= MPC_TERMINAL_HANDOFF_HEIGHT_M
+      <= self.terminal_handoff_height_m
     )
 
   def _set_launch_mount_enabled(self, enabled: bool) -> None:
@@ -2148,6 +2172,7 @@ class RocketSimulation:
     target_velocity: np.ndarray | None = None,
     feedforward_acceleration: np.ndarray | None = None,
     position_gain_scale: float = 1.0,
+    use_full_stack_stopping_law: bool = True,
   ) -> None:
     """High-rate constrained 6-DOF PD trajectory tracking control."""
 
@@ -2190,9 +2215,9 @@ class RocketSimulation:
       0.0,
     )
     if (
-      self.asynchronous_mpc
+      (self.asynchronous_mpc or not use_full_stack_stopping_law)
       and self.landing_phase is LandingPhase.DESCEND
-      and MPC_TERMINAL_HANDOFF_HEIGHT_M < body_height
+      and self.terminal_handoff_height_m < body_height
       <= ASYNC_MPC_LANDING_NO_CLIMB_HEIGHT_M
       and reference_velocity[2] < 0.0
       and velocity[2] >= reference_velocity[2]
@@ -2200,9 +2225,9 @@ class RocketSimulation:
       self.async_descent_guard_active = True
       excess_vertical_speed = float(velocity[2] - reference_velocity[2])
       recovery_acceleration = min(
-        ASYNC_MPC_LANDING_MAX_DESCENT_RECOVERY_MPS2,
-        ASYNC_MPC_LANDING_MIN_DESCENT_RECOVERY_MPS2
-        + ASYNC_MPC_LANDING_DESCENT_RECOVERY_GAIN * excess_vertical_speed,
+        LANDING_MAX_DESCENT_RECOVERY_MPS2,
+        LANDING_MIN_DESCENT_RECOVERY_MPS2
+        + LANDING_DESCENT_RECOVERY_GAIN * excess_vertical_speed,
       )
       desired_acceleration[2] = min(
         float(desired_acceleration[2]),
@@ -2218,28 +2243,46 @@ class RocketSimulation:
       and self.landing_phase is LandingPhase.DESCEND
     )
     if full_stack_return_burn:
-      downward_speed = max(-float(self.data.qvel[2]), 0.0)
-      throttle_lag_distance = (
-        downward_speed * THROTTLE_ACTUATOR_TIME_CONSTANT_S
-      )
-      available_braking_height = max(
-        body_height
-        - FULL_STACK_TERMINAL_CUTOFF_HEIGHT_M
-        - throttle_lag_distance,
-        0.20,
-      )
-      desired_net_deceleration = FULL_STACK_TERMINAL_BRAKING_FACTOR * max(
-        (
-          downward_speed**2
-          - FULL_STACK_TERMINAL_TARGET_SPEED_MPS**2
+      if use_full_stack_stopping_law:
+        downward_speed = max(-float(self.data.qvel[2]), 0.0)
+        throttle_lag_distance = (
+          downward_speed * THROTTLE_ACTUATOR_TIME_CONSTANT_S
         )
-        / (2.0 * available_braking_height),
-        0.0,
-      )
-      required_force[2] = self.controller.wet_mass_kg * (
-        abs(float(self.model.opt.gravity[2]))
-        + desired_net_deceleration
-      )
+        available_braking_height = max(
+          body_height
+          - FULL_STACK_TERMINAL_CUTOFF_HEIGHT_M
+          - throttle_lag_distance,
+          0.20,
+        )
+        if (
+          body_height > FULL_STACK_TERMINAL_CUTOFF_HEIGHT_M
+          and reference_velocity[2] < 0.0
+          and velocity[2] >= reference_velocity[2]
+        ):
+          self.async_descent_guard_active = True
+          excess_vertical_speed = float(velocity[2] - reference_velocity[2])
+          recovery_acceleration = min(
+            LANDING_MAX_DESCENT_RECOVERY_MPS2,
+            LANDING_MIN_DESCENT_RECOVERY_MPS2
+            + LANDING_DESCENT_RECOVERY_GAIN * excess_vertical_speed,
+          )
+          required_force[2] = self.controller.wet_mass_kg * max(
+            abs(float(self.model.opt.gravity[2])) - recovery_acceleration,
+            0.0,
+          )
+        else:
+          desired_net_deceleration = FULL_STACK_TERMINAL_BRAKING_FACTOR * max(
+            (
+              downward_speed**2
+              - FULL_STACK_TERMINAL_TARGET_SPEED_MPS**2
+            )
+            / (2.0 * available_braking_height),
+            0.0,
+          )
+          required_force[2] = self.controller.wet_mass_kg * (
+            abs(float(self.model.opt.gravity[2]))
+            + desired_net_deceleration
+          )
       intercept_time = max(
         2.0 * self.ballistic_time_to_pad_altitude_seconds(),
         20.0,
@@ -2423,6 +2466,12 @@ class RocketSimulation:
     requested_target_position: np.ndarray,
     requested_target_velocity: np.ndarray,
   ) -> None:
+    if (
+      result.success
+      and result.scaled_dynamics_defect > ASYNC_MPC_MAX_SCALED_DEFECT
+    ):
+      self._reject_async_mpc_result(result, "dynamics_defect")
+      return
     if not result.success:
       failure_reason = result.status
       if (
@@ -2475,8 +2524,14 @@ class RocketSimulation:
       self._reject_async_mpc_result(result, "trajectory_expired")
       return False
     current_predicted_state = sampled[0]
-    if not self._async_prediction_matches_current_state(
-      current_predicted_state
+    strict_trajectory_validation = (
+      self.asynchronous_mpc or not self.full_stack_loadout
+    )
+    if (
+      strict_trajectory_validation
+      and not self._async_prediction_matches_current_state(
+        current_predicted_state
+      )
     ):
       self._reject_async_mpc_result(result, "trajectory_mismatch")
       return False
@@ -2503,7 +2558,10 @@ class RocketSimulation:
       if self.landing_active
       else ASYNC_MPC_MAX_HOVER_TARGET_SHIFT_M
     )
-    if np.linalg.norm(target_position_delta) > maximum_target_shift:
+    if (
+      strict_trajectory_validation
+      and np.linalg.norm(target_position_delta) > maximum_target_shift
+    ):
       self._reject_async_mpc_result(result, "target_shift")
       return False
     reference_position = predicted_state[POSITION] + target_position_delta
@@ -2560,6 +2618,7 @@ class RocketSimulation:
         if self.landing_active
         else ASYNC_MPC_HOVER_POSITION_GAIN_SCALE
       ),
+      use_full_stack_stopping_law=False,
     )
     self._allocate_attitude_control(self.controller.thrust_direction_world())
     self.mpc_using_pd = False
@@ -2585,21 +2644,41 @@ class RocketSimulation:
   def _apply_mpc_result(self, result: MPCResult) -> None:
     self.last_mpc_result = result
     if not result.success:
+      self._active_async_mpc_result = None
+      self._active_async_mpc_request_time = -math.inf
+      self._active_async_mpc_target_position[:] = 0.0
+      self._active_async_mpc_target_velocity[:] = 0.0
+      if self.full_stack_loadout:
+        self.async_mpc_rejection_reason = result.status
       self.mpc_using_pd = True
       return
-    command = result.control
-    self.controller.throttle = float(
-      np.clip(
-        command[THRUST] / self.controller.limits.nominal_max_newtons,
-        self.controller.limits.min_throttle,
-        self.controller.limits.max_throttle,
-      )
-    )
+    if (
+      self.full_stack_loadout
+      and not self.upper_stage_attached
+      and self.landing_phase is LandingPhase.DESCEND
+    ):
+      self._active_async_mpc_result = result
+      self._active_async_mpc_request_time = float(self.last_mpc_request_time)
+      self._active_async_mpc_target_position[:] = self.hover_target_position
+      self._active_async_mpc_target_velocity[:] = self.hover_target_velocity
+      self.async_mpc_rejection_reason = ""
+      self.mpc_using_pd = False
+      return
+    self.async_descent_guard_active = False
+    command = np.asarray(result.control, dtype=float)
     gimbal = np.asarray(command[GIMBAL], dtype=float).copy()
     max_gimbal = self._active_gimbal_limit_radians()
     magnitude = float(np.linalg.norm(gimbal))
     if magnitude > max_gimbal:
       gimbal *= max_gimbal / magnitude
+    thrust_command = float(command[THRUST])
+    self.controller.throttle = float(
+      np.clip(
+        thrust_command / self.controller.limits.nominal_max_newtons,
+        self.controller.limits.min_throttle,
+        self.controller.limits.max_throttle,
+      )
+    )
     self.engine_gimbal_command_radians[:] = gimbal
     self.roll_control_torque_command_nm = float(
       np.clip(
@@ -2712,11 +2791,6 @@ class RocketSimulation:
       self.disable_hover()
       return
     self._poll_mpc_result()
-    if self.full_stack_loadout:
-      self.mpc_using_pd = True
-      self._pd_hover_guidance()
-      self._allocate_attitude_control(self.controller.thrust_direction_world())
-      return
     if self.terminal_controller_active:
       self.mpc_using_pd = True
       self._pd_hover_guidance()
@@ -2732,7 +2806,11 @@ class RocketSimulation:
       and self._mpc_future is None
     ):
       self._request_mpc_solution()
-    if self.asynchronous_mpc:
+    track_mpc_trajectory = self.asynchronous_mpc or (
+      self.full_stack_loadout
+      and self._active_async_mpc_result is not None
+    )
+    if track_mpc_trajectory:
       if not self._track_async_mpc_trajectory():
         self._pd_hover_guidance()
         self._allocate_attitude_control(
@@ -3377,8 +3455,6 @@ class RocketSimulation:
       control_line = "CTRL BALLISTIC COAST: ENGINE ARMED"
     elif self.hover_enabled and self.terminal_controller_active:
       control_line = "CTRL 6-DOF TERMINAL"
-    elif self.hover_enabled and self.full_stack_loadout:
-      control_line = "CTRL FULL-STACK RETURN GUIDANCE"
     elif self.hover_enabled and self.enable_mpc:
       if self.mpc_using_pd:
         pd_detail = (
@@ -3391,14 +3467,22 @@ class RocketSimulation:
         timing = "ASYNC" if self.asynchronous_mpc else "SYNC"
         control_line = f"CTRL SCVX MPC {timing}: WARMING"
       else:
-        timing = "ASYNC+INNER" if self.asynchronous_mpc else "SYNC"
+        timing = (
+          "ASYNC+INNER"
+          if self.asynchronous_mpc
+          else "SYNC+INNER" if self.full_stack_loadout else "SYNC"
+        )
         control_line = (
           f"CTRL SCVX MPC {timing}: "
           f"{self.last_mpc_result.status.upper()}  "
           f"{self.last_mpc_result.solve_time_seconds * 1000:.0f} ms"
         )
     elif self.hover_enabled:
-      control_line = "CTRL 6-DOF PD"
+      control_line = (
+        "CTRL FULL-STACK RETURN PD"
+        if self.full_stack_loadout
+        else "CTRL 6-DOF PD"
+      )
     else:
       control_line = "CTRL 6-DOF TVC"
     if self.landing_leg_deployment >= 1.0 - 1e-9:
@@ -3697,8 +3781,6 @@ class RocketWindow:
     if simulation.hover_enabled:
       if simulation.terminal_controller_active:
         return "TERMINAL ACTIVE", (0.20, 0.32, 0.68, 0.96)
-      if simulation.full_stack_loadout:
-        return "RETURN ACTIVE", (0.52, 0.20, 0.68, 0.96)
       if (
         simulation.enable_mpc
         and not simulation.mpc_using_pd
