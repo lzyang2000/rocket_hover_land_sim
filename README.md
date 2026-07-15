@@ -49,7 +49,7 @@ The mission/guidance phase (`BOOST`, `ALIGN`, `COAST`, `DESCEND`, or terminal ap
 ## What is included
 
 - MuJoCo free rigid body with 3-D position, quaternion attitude, linear/angular velocity, moving center of mass, inertia, and contact.
-- Flat 1 km × 1 km ground plane centered on the launch/landing pad for contact and wide-area flight visualization.
+- Flat 1 km × 1 km ground plane with a tower-side launch pad at the origin and a dedicated full-stack landing pad 10 m toward world `+X`.
 - A 72 m visual-only steel launch tower with three service arms, positioned to the left of the rocket.
 - Falcon 9 first-stage proportions: approximately 41.2 m tall, 3.66 m diameter, and 18 m deployed leg span.
 - Four horizontally deployed grid fins, four folding landing legs, and a nine-engine base whose active 9/3/1 engine cluster is visible throughout the mission.
@@ -135,7 +135,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.15`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.16`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -224,7 +224,7 @@ Press `J` or click `LAUNCH + RETURN` while the reset rocket is stationary on the
 
 Starting this mission automatically pulls the tracking camera back to three times the normal hover/landing distance so the full stack and early ascent remain in view. Reset restores the normal camera distance.
 
-The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 544,600 kg at liftoff, a 433,100 kg first stage (25,600 kg dry plus 407,500 kg propellant), a 111,500 kg second stage (4,000 kg dry plus 107,500 kg propellant), and nine visible Merlin-class first-stage engines. The fairing remains part of the visual teaching model but is not assigned additional payload mass beyond the stated second-stage wet mass. The vehicle rises vertically through 1 km, then follows a smooth pitch program that reaches 18° from vertical by 45 km. This creates a visible downrange ballistic arc instead of the previous straight-up trajectory. Guidance still predicts the zero-thrust apogee
+The button changes the reset landing vehicle into an approximate full Falcon 9 loadout: 544,600 kg at liftoff, a 433,100 kg first stage (25,600 kg dry plus 407,500 kg propellant), a 111,500 kg second stage (4,000 kg dry plus 107,500 kg propellant), and nine visible Merlin-class first-stage engines. The fairing remains part of the visual teaching model but is not assigned additional payload mass beyond the stated second-stage wet mass. The vehicle launches beside the tower at world `X=0` and returns to the separately marked pad at `X=+10 m`, keeping the deployed legs and fuselage clear of the tower arms. It rises vertically through 1 km, then follows a smooth pitch program that reaches 18° from vertical by 45 km. This creates a visible downrange ballistic arc instead of the previous straight-up trajectory. Guidance still predicts the zero-thrust apogee
 
 \[
 h_a=h+\frac{\max(v_z,0)^2}{2g}
@@ -460,7 +460,7 @@ Controls use world X/Y axes. The camera can rotate independently.
 | Nonlinear defect | Mismatch between the convex predicted state and an independent nonlinear rollout |
 | Warm start | Shift the previous MPC solution forward to initialize the next solve |
 | Coast | Zero main-engine thrust with the engine still armed for automatic relight |
-| Launch-return | Autonomous pitched ascent, boost-back, ballistic coast, and booster landing near the origin pad |
+| Launch-return | Autonomous pitched ascent, boost-back, ballistic coast, and booster landing on the pad 10 m from the tower |
 | Terminal control | Intentional low-altitude PD mode below the 7 m handoff |
 | TVC | Thrust-vector control through engine gimballing |
 

@@ -13,6 +13,7 @@ from rocket_landing.sim import (
   FALCON9_ASCENT_ENGINE_COUNT,
   FALCON9_ATTACHED_UPPER_STACK_MASS_KG,
   FALCON9_FIRST_STAGE_PROPELLANT_KG,
+  FALCON9_LANDING_PAD_POSITION,
   FALCON9_LIFTOFF_MASS_KG,
   FALCON9_TERMINAL_ENGINE_COUNT,
   FALCON9_UPPER_STAGE_PROPELLANT_KG,
@@ -396,7 +397,7 @@ def test_full_throttle_launch_fuel_auto_lands_below_100kg_reserve() -> None:
   assert accepted_mpc_attempts / mpc_attempts > 0.60
 
 
-def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
+def test_launch_return_boosts_coasts_and_lands_on_offset_pad() -> None:
   simulation = RocketSimulation()
   assert simulation.start_launch_return()
   assert simulation.controller.wet_mass_kg == pytest.approx(
@@ -527,7 +528,9 @@ def test_launch_return_boosts_coasts_and_lands_on_origin_pad() -> None:
   assert simulation.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
   assert simulation.landing_leg_deployment == pytest.approx(1.0)
   assert 0.0 < simulation.data.qpos[2] - ROCKET_LANDED_COM_Z_M < 2.0
-  assert np.linalg.norm(simulation.data.qpos[0:2]) < 1.0
+  assert np.linalg.norm(
+    simulation.data.qpos[0:2] - FALCON9_LANDING_PAD_POSITION[0:2]
+  ) < 3.0
   assert np.linalg.norm(simulation.data.qvel[0:2]) < 1.0
   assert simulation._body_tilt_radians() < math.radians(1.0)
 
@@ -575,7 +578,7 @@ def test_full_stack_terminal_cutoff_does_not_relaunch() -> None:
   simulation._set_landing_leg_deployment(1.0)
   simulation._set_launch_mount_enabled(False)
   simulation.data.qpos[0:3] = (
-    0.0,
+    FALCON9_LANDING_PAD_POSITION[0],
     0.0,
     ROCKET_LANDED_COM_Z_M + 6.0,
   )

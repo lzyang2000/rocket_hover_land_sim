@@ -123,9 +123,9 @@ The modeled force limit is 5 kN per pod, producing at most 17.5 kN m. A 0.10 s f
 
 MuJoCo remains the authoritative plant. The MPC model is propagated with RK4 over each prediction interval, and quaternions are normalized after propagation.
 
-The world contact surface is a flat 1 km × 1 km MuJoCo plane centered on the origin pad, implemented with 500 m half-extents in `rocket.xml`. It provides collision support and visual context only; it does not introduce terrain elevation, Earth curvature, or additional aerodynamic effects.
+The world contact surface is a flat 1 km × 1 km MuJoCo plane centered near the launch complex, implemented with 500 m half-extents in `rocket.xml`. It provides collision support and visual context only; it does not introduce terrain elevation, Earth curvature, or additional aerodynamic effects. The launch mount and tower remain at world `X=0`; the full-stack return target and its orange-ringed landing pad are centered at `X=+10 m`. Ordinary landing-lab exercises retain their origin target, while the autonomous launch-return uses the offset site.
 
-The 72 m launch tower is also fixed world geometry. Its columns, platforms, braces, and service arms have both contact masks disabled, so the tower provides scale and launch-pad context without applying forces to either stage.
+The 72 m launch tower is also fixed world geometry. Its columns, platforms, braces, and service arms have both contact masks disabled, so the tower provides scale and launch-pad context without applying forces to either stage. The 10 m return-site offset additionally prevents the deployed landing-leg envelope from visually intersecting the service arms.
 
 The central teaching point is that translation and rotation are coupled. Tilting thrust creates horizontal acceleration, but because the engine is below the COM it also creates angular acceleration. A controller cannot command lateral motion independently of attitude and still represent the rigid-body physics.
 

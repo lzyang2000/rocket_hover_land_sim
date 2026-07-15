@@ -20,6 +20,7 @@ from rocket_landing.sim import (
   ASYNC_MPC_MAX_ACCEPT_AGE_S,
   FALCON9_BOOSTER_SEPARATION_IDLE_DURATION_S,
   FALCON9_BOOSTER_SEPARATION_IDLE_THROTTLE,
+  FALCON9_LANDING_PAD_POSITION,
   FALCON9_MERLIN_MIN_THROTTLE,
   FALCON9_UPPER_STAGE_IGNITION_DELAY_S,
   FALCON9_UPPER_STAGE_SEPARATION_GIMBAL_DEG,
@@ -139,6 +140,12 @@ def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   grid_fin_yp_id = mujoco.mj_name2id(
     simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "grid_fin_yp"
   )
+  launch_pad_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "launch_pad"
+  )
+  landing_pad_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "landing_pad"
+  )
 
   assert 2.0 * simulation.model.geom_size[fuselage_id, 0] == pytest.approx(
     ROCKET_DIAMETER_M
@@ -151,6 +158,12 @@ def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   )
   assert simulation.model.geom_size[grid_fin_yp_id] == pytest.approx(
     np.array([0.72, 0.66, 0.075])
+  )
+  assert simulation.model.geom_pos[launch_pad_id, 0:2] == pytest.approx(
+    (0.0, 0.0)
+  )
+  assert simulation.model.geom_pos[landing_pad_id, 0:2] == pytest.approx(
+    FALCON9_LANDING_PAD_POSITION[0:2]
   )
 
   simulation._set_landing_leg_deployment(1.0)
@@ -391,7 +404,7 @@ def test_full_stack_powered_return_requests_and_applies_mpc() -> None:
   simulation.landing_phase = LandingPhase.DESCEND
   simulation.hover_enabled = True
   simulation.data.qpos[0:3] = (
-    0.0,
+    FALCON9_LANDING_PAD_POSITION[0],
     0.0,
     ROCKET_LANDED_COM_Z_M + 100.0,
   )
@@ -445,6 +458,7 @@ def test_async_full_stack_mpc_tracking_does_not_use_pd_stopping_override() -> No
     simulation.launch_return_phase = LaunchReturnPhase.RETURN
     simulation.landing_phase = LandingPhase.DESCEND
     simulation.hover_enabled = True
+    simulation.data.qpos[0] = FALCON9_LANDING_PAD_POSITION[0]
     simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 100.0
     mujoco.mj_forward(simulation.model, simulation.data)
     simulation.hover_target_position = simulation.center_of_mass_position_world()
@@ -487,7 +501,7 @@ def test_real_full_stack_return_mpc_rejects_virtual_teleporting() -> None:
   simulation.landing_burn_from_coast = True
   simulation.hover_enabled = True
   simulation.data.qpos[0:3] = (
-    0.0,
+    FALCON9_LANDING_PAD_POSITION[0],
     0.0,
     ROCKET_LANDED_COM_Z_M + 250.0,
   )
@@ -551,6 +565,7 @@ def test_full_stack_mpc_accepts_high_deceleration_iterate() -> None:
   simulation.landing_burn_from_coast = True
   simulation.hover_enabled = True
   simulation.data.qpos[2] = ROCKET_LANDED_COM_Z_M + 250.0
+  simulation.data.qpos[0] = FALCON9_LANDING_PAD_POSITION[0]
   simulation.data.qvel[:] = 0.0
   simulation.data.qvel[2] = -62.0
   mujoco.mj_forward(simulation.model, simulation.data)
@@ -576,6 +591,9 @@ def test_async_launch_prebuilds_return_mpc_controllers() -> None:
   simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
   try:
     assert simulation.start_launch_return()
+    assert simulation.landing_center_of_mass_position()[0:2] == pytest.approx(
+      FALCON9_LANDING_PAD_POSITION[0:2]
+    )
     future = simulation._return_mpc_prebuild_future
     assert future is not None
     deadline = time.monotonic() + 1.0

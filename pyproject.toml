@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mujoco-rocket-landing"
-version = "0.10.15"
+version = "0.10.16"
 description = "Interactive 6-DOF MuJoCo rocket with successive-convexification MPC."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -204,6 +204,9 @@ ROCKET_HEIGHT_M = 41.2
 ROCKET_DIAMETER_M = 3.66
 ROCKET_LANDED_COM_Z_M = 20.76
 LANDING_PAD_POSITION = np.array([0.0, 0.0, ROCKET_LANDED_COM_Z_M])
+FALCON9_LANDING_PAD_POSITION = np.array(
+  [10.0, 0.0, ROCKET_LANDED_COM_Z_M]
+)
 LANDING_STAGING_HEIGHT_M = 25.0
 LANDING_STAGING_MIN_ALTITUDE_M = (
   ROCKET_LANDED_COM_Z_M + LANDING_STAGING_HEIGHT_M
@@ -233,7 +236,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.15 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.16 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -1302,7 +1305,11 @@ class RocketSimulation:
   def landing_center_of_mass_position(self) -> np.ndarray:
     """Upright COM target when the landing-leg reference is on the pad."""
 
-    target = LANDING_PAD_POSITION.copy()
+    target = (
+      FALCON9_LANDING_PAD_POSITION.copy()
+      if self.full_stack_loadout
+      else LANDING_PAD_POSITION.copy()
+    )
     target[2] += self.current_mass_properties().center_of_mass_body_m[2]
     return target
 
@@ -1624,8 +1631,11 @@ class RocketSimulation:
           else self.controller.limits.min_throttle
         )
       impact_x = float(self.predicted_ballistic_impact_position_xy()[0])
+      landing_site_x = float(self.landing_center_of_mass_position()[0])
       boostback_complete = (
-        aligned and impact_x <= FALCON9_BOOSTBACK_POWERED_IMPACT_TARGET_M
+        aligned
+        and impact_x - landing_site_x
+        <= FALCON9_BOOSTBACK_POWERED_IMPACT_TARGET_M
       )
       fuel_floor_reached = (
         self.controller.fuel_mass_kg <= FALCON9_MIN_RETURN_PROPELLANT_KG
@@ -1761,7 +1771,10 @@ class RocketSimulation:
       fuel_takeover=True
     )
     staging_height = max(staging_altitude - landed_com_altitude, 0.0)
-    horizontal_error = float(np.linalg.norm(position[0:2]))
+    landed_position = self.landing_center_of_mass_position()
+    horizontal_error = float(
+      np.linalg.norm(position[0:2] - landed_position[0:2])
+    )
     horizontal_speed = float(np.linalg.norm(velocity[0:2]))
     mass = self.controller.wet_mass_kg
     gravity = abs(float(self.model.opt.gravity[2]))
@@ -2088,7 +2101,9 @@ class RocketSimulation:
     body_position = self.data.qpos[0:3]
     body_velocity = self.data.qvel[0:3]
     landed_com_position = self.landing_center_of_mass_position()
-    horizontal_error = float(np.linalg.norm(position[0:2]))
+    horizontal_error = float(
+      np.linalg.norm(position[0:2] - landed_com_position[0:2])
+    )
     horizontal_speed = float(np.linalg.norm(velocity[0:2]))
     height = max(float(body_position[2] - LANDING_PAD_POSITION[2]), 0.0)
     horizontal_lead = self.landing_horizontal_lead_for_height_m(height)
