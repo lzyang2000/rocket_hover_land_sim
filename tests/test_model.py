@@ -572,6 +572,29 @@ def test_full_stack_mpc_accepts_high_deceleration_iterate() -> None:
   )
 
 
+def test_async_launch_prebuilds_return_mpc_controllers() -> None:
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+  try:
+    assert simulation.start_launch_return()
+    future = simulation._return_mpc_prebuild_future
+    assert future is not None
+    deadline = time.monotonic() + 1.0
+    while not future.done() and time.monotonic() < deadline:
+      time.sleep(0.001)
+    assert future.done()
+    prebuilt = future.result()
+    expected_three_engine_mpc = prebuilt[3][1]
+    expected_one_engine_mpc = prebuilt[1][1]
+
+    simulation._set_return_engine_count(3)
+
+    assert simulation.mpc is expected_three_engine_mpc
+    assert simulation._return_mpc_prebuild_future is None
+    assert simulation._return_mpc_cache[1][1] is expected_one_engine_mpc
+  finally:
+    simulation.close()
+
+
 def test_thrust_arrow_is_appended_only_while_engine_is_lit() -> None:
   window = RocketWindow.__new__(RocketWindow)
   window.simulation = RocketSimulation()

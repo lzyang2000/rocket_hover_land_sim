@@ -135,7 +135,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.14`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.15`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -325,6 +325,8 @@ Mass and thrust are both 30 times the original paper-example scale, preserving t
 The upper stack is inertially lumped into the launch vehicle until separation. At that event its visible geometry transfers to a second free rigid body with independent velocity, mass depletion, and axial propulsion. The nine- and three-engine forces on the booster are still applied as equivalent centered resultants at the engine section. The per-engine arrows make the selected physical cluster visible, but each arrow shares the cluster's common throttle and gimbal command. This captures total force, fuel flow, mass ratio, separation loss, downrange motion, and gimbal moment-arm coupling, but not individual-engine plume interaction or differential-engine allocation.
 
 High-level mission events remain deterministic: ascent pitch, apogee cutoff, stage separation, boostback completion, ballistic coast, engine-count switching, ignition, and touchdown shutdown. During a powered return, however, the same 6-DOF SCvx MPC used by the landing lab now owns the optimized trajectory whenever a solution is accepted. Both modes track that nonlinear trajectory with the high-rate inner loop: synchronous mode solves from the current state before tracking, while async mode first compensates and validates worker latency. This avoids holding the long booster's non-minimum-phase first gimbal command for an entire MPC update interval. `PD ACTIVE` is used only while a solve is pending, after rejection, when MPC is disabled, or below the terminal handoff altitude. The ordinary landing lab hands off at 7 m; the full-stack return keeps MPC available down to 1 m so the fallback stopping law cannot arrest the booster several metres above the pad. Coast cannot use the current MPC because its convex model enforces a positive minimum thrust while the engine is lit.
+
+In async mode, the three-engine and one-engine return MPC problem structures are prebuilt on the worker during ascent. Stage separation and the later engine-count switch therefore swap in an already constructed controller instead of rebuilding CVXPY structures on the render/physics thread. If prebuilding has not completed, the deterministic fallback remains available and construction falls back safely.
 
 The tank intervals and RCS force level are transparent engineering assumptions, not published Block 5 specifications. A real Falcon 9 combines phase-dependent differential engine gimballing, aerodynamic grid-fin authority, and cold-gas attitude control; this single-engine landing model uses the opposed force pair as the explicit low-authority axial actuator.
 

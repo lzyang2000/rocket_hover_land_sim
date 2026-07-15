@@ -233,7 +233,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.14 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.15 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -497,6 +497,12 @@ class RocketSimulation:
       if self.asynchronous_mpc
       else None
     )
+    self._return_mpc_prebuild_future: Future[
+      dict[int, tuple[MPCConfig, SixDofMPC]]
+    ] | None = None
+    self._return_mpc_cache: dict[
+      int, tuple[MPCConfig, SixDofMPC]
+    ] = {}
     self._mpc_future: Future[
       tuple[int, float, np.ndarray, np.ndarray, MPCResult]
     ] | None = None
@@ -628,35 +634,39 @@ class RocketSimulation:
       ),
     )
 
-  def _rebuild_mpc_controller(self) -> None:
-    self._mpc_config = MPCConfig(
+  def _make_mpc_config(
+    self,
+    *,
+    limits: ThrustLimits,
+    active_engine_count: int,
+    full_stack_loadout: bool,
+  ) -> MPCConfig:
+    return MPCConfig(
       initial_mass_kg=self.mass_model.initial_mass_kg,
       dry_mass_kg=self.controller.dry_mass_kg,
       initial_inertia_kgm2=self.mass_model.initial_inertia_kgm2,
       mass_model=self.mass_model,
       engine_position_body_m=tuple(float(value) for value in ENGINE_POSITION_BODY),
-      alpha_kg_per_newton_second=(
-        self.controller.limits.alpha_kg_per_newton_second
-      ),
-      min_thrust_newtons=self.controller.limits.min_thrust_newtons,
-      max_thrust_newtons=self.controller.limits.max_thrust_newtons,
+      alpha_kg_per_newton_second=limits.alpha_kg_per_newton_second,
+      min_thrust_newtons=limits.min_thrust_newtons,
+      max_thrust_newtons=limits.max_thrust_newtons,
       max_gimbal_radians=min(
         LANDING_GIMBAL_LIMIT_RADIANS,
-        math.radians(self.controller.limits.pointing_half_angle_deg),
+        math.radians(limits.pointing_half_angle_deg),
       ),
       max_roll_torque_nm=MAX_ROLL_CONTROL_TORQUE_NM,
       virtual_control_weight=(
         FALCON9_MPC_VIRTUAL_CONTROL_WEIGHT
-        if self.full_stack_loadout
+        if full_stack_loadout
         else 300_000.0
       ),
-      solver_max_iterations=200 if self.full_stack_loadout else 100,
-      allow_refinement_recovery=self.full_stack_loadout,
+      solver_max_iterations=200 if full_stack_loadout else 100,
+      allow_refinement_recovery=full_stack_loadout,
       successive_iterations=(
         6
         if (
-          self.full_stack_loadout
-          and self.active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
+          full_stack_loadout
+          and active_engine_count == FALCON9_TERMINAL_ENGINE_COUNT
         )
         else 3
       ),
@@ -666,11 +676,68 @@ class RocketSimulation:
         .center_of_mass_body_m[2]
         - 0.10
       ),
-      maximum_scaled_defect=0.45 if self.full_stack_loadout else 0.20,
+      maximum_scaled_defect=0.45 if full_stack_loadout else 0.20,
+    )
+
+  def _rebuild_mpc_controller(self) -> None:
+    self._mpc_config = self._make_mpc_config(
+      limits=self.controller.limits,
+      active_engine_count=self.active_engine_count,
+      full_stack_loadout=self.full_stack_loadout,
     )
     self.mpc = SixDofMPC(self._mpc_config) if self.enable_mpc else None
 
+  @staticmethod
+  def _build_return_mpc_controllers(
+    configurations: dict[int, MPCConfig],
+  ) -> dict[int, tuple[MPCConfig, SixDofMPC]]:
+    return {
+      engine_count: (config, SixDofMPC(config))
+      for engine_count, config in configurations.items()
+    }
+
+  def _discard_return_mpc_prebuild(self) -> None:
+    if self._return_mpc_prebuild_future is not None:
+      self._return_mpc_prebuild_future.cancel()
+      self._return_mpc_prebuild_future = None
+    self._return_mpc_cache.clear()
+
+  def _schedule_return_mpc_prebuild(self) -> None:
+    self._discard_return_mpc_prebuild()
+    if self._mpc_executor is None or not self.enable_mpc:
+      return
+    configurations = {
+      engine_count: self._make_mpc_config(
+        limits=falcon9_return_thrust_limits(engine_count),
+        active_engine_count=engine_count,
+        full_stack_loadout=True,
+      )
+      for engine_count in (
+        FALCON9_RETURN_ENGINE_COUNT,
+        FALCON9_TERMINAL_ENGINE_COUNT,
+      )
+    }
+    self._return_mpc_prebuild_future = self._mpc_executor.submit(
+      self._build_return_mpc_controllers,
+      configurations,
+    )
+
+  def _install_prebuilt_return_mpc(self, engine_count: int) -> bool:
+    future = self._return_mpc_prebuild_future
+    if future is not None and future.done():
+      try:
+        self._return_mpc_cache.update(future.result())
+      except Exception:
+        self._return_mpc_cache.clear()
+      self._return_mpc_prebuild_future = None
+    cached = self._return_mpc_cache.pop(engine_count, None)
+    if cached is None:
+      return False
+    self._mpc_config, self.mpc = cached
+    return True
+
   def _configure_landing_loadout(self) -> None:
+    self._discard_return_mpc_prebuild()
     self.controller.configure(
       limits=LANDING_THRUST_LIMITS,
       dry_mass_kg=21_000.0,
@@ -1358,6 +1425,7 @@ class RocketSimulation:
     self.controller.center_lateral()
     self.launch_attitude_target_world[:] = (0.0, 0.0, 1.0)
     self.launch_pitch_angle_radians = 0.0
+    self._schedule_return_mpc_prebuild()
     return True
 
   def _update_gravity_turn_target(self) -> None:
@@ -1395,7 +1463,8 @@ class RocketSimulation:
       preserve_thrust=True,
     )
     self.active_engine_count = engine_count
-    self._rebuild_mpc_controller()
+    if not self._install_prebuilt_return_mpc(engine_count):
+      self._rebuild_mpc_controller()
 
   def _separate_upper_stage(self) -> None:
     """Jettison the lumped upper stack and configure the entry-burn cluster."""
