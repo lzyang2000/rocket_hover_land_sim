@@ -146,6 +146,12 @@ def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   landing_pad_id = mujoco.mj_name2id(
     simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "landing_pad"
   )
+  launch_target_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "launch_target_outer"
+  )
+  landing_target_id = mujoco.mj_name2id(
+    simulation.model, mujoco.mjtObj.mjOBJ_GEOM, "target_outer"
+  )
 
   assert 2.0 * simulation.model.geom_size[fuselage_id, 0] == pytest.approx(
     ROCKET_DIAMETER_M
@@ -164,6 +170,18 @@ def test_vehicle_has_falcon_9_first_stage_proportions() -> None:
   )
   assert simulation.model.geom_pos[landing_pad_id, 0:2] == pytest.approx(
     FALCON9_LANDING_PAD_POSITION[0:2]
+  )
+  assert simulation.model.geom_pos[launch_target_id, 0:2] == pytest.approx(
+    (0.0, 0.0)
+  )
+  assert simulation.model.geom_pos[landing_target_id, 0:2] == pytest.approx(
+    FALCON9_LANDING_PAD_POSITION[0:2]
+  )
+  assert simulation.model.geom_rgba[launch_target_id, 0:3] == pytest.approx(
+    (1.0, 0.78, 0.08)
+  )
+  assert simulation.model.geom_rgba[landing_target_id, 0:3] == pytest.approx(
+    (1.0, 0.78, 0.08)
   )
 
   simulation._set_landing_leg_deployment(1.0)
