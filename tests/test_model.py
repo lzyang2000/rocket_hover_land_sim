@@ -608,6 +608,11 @@ def test_full_stack_mpc_accepts_high_deceleration_iterate() -> None:
 def test_async_launch_prebuilds_return_mpc_controllers() -> None:
   simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
   try:
+    if simulation._mpc_process_executor is not None:
+      simulation._mpc_process_executor.shutdown(
+        wait=False, cancel_futures=True
+      )
+      simulation._mpc_process_executor = None
     assert simulation.start_launch_return()
     assert simulation.landing_center_of_mass_position()[0:2] == pytest.approx(
       FALCON9_LANDING_PAD_POSITION[0:2]
@@ -627,6 +632,28 @@ def test_async_launch_prebuilds_return_mpc_controllers() -> None:
     assert simulation.mpc is expected_three_engine_mpc
     assert simulation._return_mpc_prebuild_future is None
     assert simulation._return_mpc_cache[1][1] is expected_one_engine_mpc
+  finally:
+    simulation.close()
+
+
+def test_async_worker_kind_is_reported_in_telemetry() -> None:
+  simulation = RocketSimulation(enable_mpc=True, asynchronous_mpc=True)
+  try:
+    expected_kind = (
+      "PROCESS"
+      if simulation._mpc_process_executor is not None
+      else "THREAD"
+    )
+    assert simulation.async_mpc_worker_kind == expected_kind
+
+    simulation.hover_enabled = True
+    simulation.mpc_using_pd = False
+    simulation.last_mpc_result = _successful_prediction(simulation)
+
+    assert any(
+      f"SCVX MPC ASYNC-{expected_kind}+INNER" in line
+      for line in simulation.telemetry_lines()
+    )
   finally:
     simulation.close()
 

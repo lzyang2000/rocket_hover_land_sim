@@ -104,7 +104,7 @@ The `dev` extra installs pytest. If you only want to run the simulator, `uv sync
 
 The default launcher uses synchronous MPC so every optimized command is based on the current MuJoCo state and current GUI target. It precompiles the conic problem before opening the window, moving the one-time cold-start cost out of the first hover command.
 
-For responsive rendering and input while the optimizer runs in the background, use:
+For responsive rendering and input while the optimizer runs in an isolated process, use:
 
 ```bash
 uv run rocket-landing --async-mpc
@@ -112,7 +112,7 @@ uv run rocket-landing --async-mpc
 
 Async mode automatically overwrites `async_final_approach_log.csv` in the directory where the command is launched. It records 20 Hz diagnostics only while landing guidance is active below 250 m, including phase, controller owner, actual and target vertical states, throttle command/response, MPC status, rejection reason, and descent-guard activity. Close the simulator normally to flush the final row.
 
-In asynchronous mode the optimizer supplies a timestamped nonlinear reference trajectory. A deterministic controller runs at every 5 ms MuJoCo step, compensates for solver latency, rejects stale or inconsistent predictions, shifts guidance toward the latest GUI target, and owns the actual bounded thrust, gimbal, and roll commands. Old raw MPC actuator commands are never applied after a delayed solve.
+In asynchronous mode the optimizer runs in a persistent worker process with its own Python interpreter and supplies a timestamped nonlinear reference trajectory. This prevents CVXPY linearization from competing with MuJoCo/rendering for the main process's GIL. A deterministic controller runs at every 5 ms MuJoCo step, compensates for solver latency, rejects stale or inconsistent predictions, shifts guidance toward the latest GUI target, and owns the actual bounded thrust, gimbal, and roll commands. Old raw MPC actuator commands are never applied after a delayed solve. Platforms that cannot create the process worker fall back to the older thread worker and print `Async MPC worker: thread` at startup.
 
 ## Setup with a standard virtual environment
 
@@ -135,7 +135,7 @@ The custom GLFW viewer renders on the main thread, so macOS does not require MuJ
 
 ## Important when updating
 
-The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.17`.
+The simulator process does not hot-reload Python or MJCF changes. Close every existing simulator window before relaunching. The current window title should contain `v0.10.18`.
 
 The initial window is limited to the monitor's usable work area. Control widths, font resolution, and telemetry wrapping are derived from the actual GLFW window and framebuffer sizes, so the right-side labels should remain visible on both Retina and standard-density displays.
 
@@ -196,7 +196,7 @@ Releasing WASD returns thrust toward vertical but does not remove existing horiz
 
 Press `H` or click `HOVER HOLD`. The controller captures the current 3-D position and starts synchronous 6-DOF successive-convexification MPC by default. It predicts mass, position, velocity, quaternion attitude, and angular velocity over a finite horizon, then applies the first bounded thrust/gimbal/roll command before physics advances again.
 
-With `--async-mpc`, SCvx becomes the slower trajectory-guidance layer and the 200 Hz deterministic 6-DOF PD controller becomes the actuator layer. Telemetry reports this as `SCVX MPC ASYNC+INNER`; rejected or unavailable predictions switch immediately to `6-DOF PD` with the rejection reason when available.
+With `--async-mpc`, SCvx becomes the slower trajectory-guidance layer and the 200 Hz deterministic 6-DOF PD controller becomes the actuator layer. Telemetry reports `SCVX MPC ASYNC-PROCESS+INNER` in the normal isolated-process path or `ASYNC-THREAD+INNER` on the compatibility fallback. Rejected or unavailable predictions switch immediately to `6-DOF PD` with the rejection reason when available.
 
 In hover mode:
 
@@ -206,7 +206,7 @@ In hover mode:
 
 WASD remains position-target driven: the position error and measured rocket velocity provide the PD/MPC feedback needed to track the moving waypoint. The controller does not falsely label the waypoint itself as travelling at 3 m/s. The horizontal target is limited to a 3.5 m lead and the altitude target to a 2 m lead relative to the rocket; holding a key keeps advancing this bounded “carrot” as the vehicle moves instead of allowing a large error to accumulate. Manual WASD steering also reaches its requested gimbal direction 50% faster. Because the gimbaled engine is below the center of mass, the rocket still briefly counter-gimbals to create the required tilt, but hover MPC commands are limited to 5° of gimbal to suppress swinging. The automatic PD recovery envelope and high-altitude landing limit remain 6°.
 
-Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC` appears when the optional background-worker mode is selected. `6-DOF PD` means the deterministic PD controller owns the vehicle because a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude PD handoff. The right-side ownership badge makes the current state explicit: purple `LAUNCH ACTIVE`, cyan `COAST ACTIVE`, green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `PD ACTIVE`, or gray `MANUAL TVC`.
+Telemetry reports `SCVX MPC SYNC: OPTIMAL` and the latest solve time when the default optimizer owns the vehicle. `SCVX MPC ASYNC-PROCESS+INNER` appears for the isolated process worker, while `ASYNC-THREAD+INNER` identifies the compatibility fallback. `6-DOF PD` means the deterministic PD controller owns the vehicle because a solve was unavailable or rejected. `6-DOF TERMINAL` is the intentional low-altitude PD handoff. The right-side ownership badge makes the current state explicit: purple `LAUNCH ACTIVE`, cyan `COAST ACTIVE`, green `MPC ACTIVE`, blue `TERMINAL ACTIVE`, orange `PD ACTIVE`, or gray `MANUAL TVC`.
 
 SCvx virtual control is penalized strongly enough that an optimizer result cannot improve tracking by effectively “teleporting” its linearized state away from the nonlinear rocket. This is especially important after a high-energy coast relight. In the full-throttle fuel-auto regression, accepted MPC ownership rises from zero to about 72% of above-terminal solve attempts while the flight still lands below the 100 kg reserve target. Remaining numerical or defect rejections continue safely under `PD ACTIVE`.
 
@@ -326,7 +326,7 @@ The upper stack is inertially lumped into the launch vehicle until separation. A
 
 High-level mission events remain deterministic: ascent pitch, apogee cutoff, stage separation, boostback completion, ballistic coast, engine-count switching, ignition, and touchdown shutdown. During a powered return, however, the same 6-DOF SCvx MPC used by the landing lab now owns the optimized trajectory whenever a solution is accepted. Both modes track that nonlinear trajectory with the high-rate inner loop: synchronous mode solves from the current state before tracking, while async mode first compensates and validates worker latency. This avoids holding the long booster's non-minimum-phase first gimbal command for an entire MPC update interval. `PD ACTIVE` is used only while a solve is pending, after rejection, when MPC is disabled, or below the terminal handoff altitude. The ordinary landing lab hands off at 7 m; the full-stack return keeps MPC available down to 1 m so the fallback stopping law cannot arrest the booster several metres above the pad. Coast cannot use the current MPC because its convex model enforces a positive minimum thrust while the engine is lit.
 
-In async mode, the three-engine and one-engine return MPC problem structures are prebuilt on the worker during ascent. Stage separation and the later engine-count switch therefore swap in an already constructed controller instead of rebuilding CVXPY structures on the render/physics thread. If prebuilding has not completed, the deterministic fallback remains available and construction falls back safely.
+In async mode, the three-engine and one-engine return MPC problem structures are prebuilt in the isolated solve process during ascent. The render process retains only immutable configuration metadata, so stage separation and the later engine-count switch do not build CVXPY structures or compete for the GIL. The thread compatibility path retains its background local-controller prebuild. If process prebuilding has not completed, solve jobs queue behind it while the deterministic fallback remains available.
 
 The tank intervals and RCS force level are transparent engineering assumptions, not published Block 5 specifications. A real Falcon 9 combines phase-dependent differential engine gimballing, aerodynamic grid-fin authority, and cold-gas attitude control; this single-engine landing model uses the opposed force pair as the explicit low-authority axial actuator.
 

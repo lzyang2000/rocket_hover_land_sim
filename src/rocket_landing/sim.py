@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from enum import Enum, auto
 import math
 from pathlib import Path
@@ -41,6 +41,82 @@ from rocket_landing.mpc import (
   normalize_quaternion,
   quaternion_slerp,
 )
+
+
+_PROCESS_MPC_CONTROLLERS: dict[str, SixDofMPC] = {}
+
+
+def _process_mpc_controller(
+  controller_key: str,
+  config: MPCConfig,
+) -> SixDofMPC:
+  controller = _PROCESS_MPC_CONTROLLERS.get(controller_key)
+  if controller is None:
+    controller = SixDofMPC(config)
+    _PROCESS_MPC_CONTROLLERS[controller_key] = controller
+  return controller
+
+
+def _initialize_process_mpc_controllers(
+  configurations: dict[str, MPCConfig],
+) -> tuple[str, ...]:
+  for controller_key, config in configurations.items():
+    _process_mpc_controller(controller_key, config)
+  return tuple(configurations)
+
+
+def _warm_process_mpc_controller(
+  controller_key: str,
+  config: MPCConfig,
+  state: np.ndarray,
+  target: np.ndarray,
+  previous_control: np.ndarray,
+  max_gimbal_radians: float,
+) -> None:
+  controller = _process_mpc_controller(controller_key, config)
+  controller.solve(
+    state,
+    target,
+    previous_control,
+    max_gimbal_radians=max_gimbal_radians,
+    central_differences=False,
+  )
+  controller.reset()
+
+
+def _solve_mpc_process_job(
+  controller_key: str,
+  config: MPCConfig,
+  generation: int,
+  request_time: float,
+  state: np.ndarray,
+  target: np.ndarray,
+  previous_control: np.ndarray,
+  max_gimbal_radians: float,
+  central_differences: bool,
+) -> tuple[int, float, np.ndarray, np.ndarray, MPCResult]:
+  controller = _process_mpc_controller(controller_key, config)
+  result = controller.solve(
+    state,
+    target,
+    previous_control,
+    max_gimbal_radians=max_gimbal_radians,
+    central_differences=central_differences,
+  )
+  return (
+    generation,
+    request_time,
+    target[POSITION].copy(),
+    target[VELOCITY].copy(),
+    result,
+  )
+
+
+def _create_mpc_process_executor() -> ProcessPoolExecutor | None:
+  try:
+    return ProcessPoolExecutor(max_workers=1)
+  except (NotImplementedError, OSError, PermissionError):
+    return None
 
 
 THROTTLE_RATE_PER_SECOND = 0.12
@@ -236,7 +312,7 @@ THRUST_ARROW_MAX_WIDTH_M = 0.66
 THRUST_ARROW_RGBA = np.array([1.0, 0.55, 0.05, 0.96], dtype=np.float32)
 DEFAULT_CAMERA_DISTANCE_M = 72.0
 LAUNCH_RETURN_CAMERA_DISTANCE_M = 3.0 * DEFAULT_CAMERA_DISTANCE_M
-APP_TITLE = "MuJoCo Powered Descent Lab v0.10.17 - 6-DOF SCvx MPC"
+APP_TITLE = "MuJoCo Powered Descent Lab v0.10.18 - 6-DOF SCvx MPC"
 
 
 LANDING_THRUST_LIMITS = ThrustLimits()
@@ -495,14 +571,24 @@ class RocketSimulation:
       maximum_scaled_defect=0.20,
     )
     self.mpc = SixDofMPC(self._mpc_config) if enable_mpc else None
+    self._mpc_process_key = "landing"
     self._mpc_executor = (
       ThreadPoolExecutor(max_workers=1, thread_name_prefix="rocket-mpc")
+      if self.asynchronous_mpc
+      else None
+    )
+    self._mpc_process_executor = (
+      _create_mpc_process_executor()
       if self.asynchronous_mpc
       else None
     )
     self._return_mpc_prebuild_future: Future[
       dict[int, tuple[MPCConfig, SixDofMPC]]
     ] | None = None
+    self._return_mpc_process_prebuild_future: Future[
+      tuple[str, ...]
+    ] | None = None
+    self._return_mpc_configurations: dict[int, MPCConfig] = {}
     self._return_mpc_cache: dict[
       int, tuple[MPCConfig, SixDofMPC]
     ] = {}
@@ -688,6 +774,11 @@ class RocketSimulation:
       active_engine_count=self.active_engine_count,
       full_stack_loadout=self.full_stack_loadout,
     )
+    self._mpc_process_key = (
+      f"falcon9-return-{self.active_engine_count}"
+      if self.full_stack_loadout
+      else "landing"
+    )
     self.mpc = SixDofMPC(self._mpc_config) if self.enable_mpc else None
 
   @staticmethod
@@ -703,6 +794,10 @@ class RocketSimulation:
     if self._return_mpc_prebuild_future is not None:
       self._return_mpc_prebuild_future.cancel()
       self._return_mpc_prebuild_future = None
+    if self._return_mpc_process_prebuild_future is not None:
+      self._return_mpc_process_prebuild_future.cancel()
+      self._return_mpc_process_prebuild_future = None
+    self._return_mpc_configurations.clear()
     self._return_mpc_cache.clear()
 
   def _schedule_return_mpc_prebuild(self) -> None:
@@ -720,12 +815,35 @@ class RocketSimulation:
         FALCON9_TERMINAL_ENGINE_COUNT,
       )
     }
+    self._return_mpc_configurations.update(configurations)
+    if self._mpc_process_executor is not None:
+      process_configurations = {
+        f"falcon9-return-{engine_count}": config
+        for engine_count, config in configurations.items()
+      }
+      self._return_mpc_process_prebuild_future = (
+        self._mpc_process_executor.submit(
+          _initialize_process_mpc_controllers,
+          process_configurations,
+        )
+      )
+      return
     self._return_mpc_prebuild_future = self._mpc_executor.submit(
       self._build_return_mpc_controllers,
       configurations,
     )
 
   def _install_prebuilt_return_mpc(self, engine_count: int) -> bool:
+    if self._mpc_process_executor is not None:
+      config = self._return_mpc_configurations.get(engine_count)
+      if config is None:
+        return False
+      # The production async path solves entirely in the worker process. Keep
+      # only the selected immutable configuration in the render process so no
+      # CVXPY problem construction can contend with physics for the GIL.
+      self._mpc_config = config
+      self._mpc_process_key = f"falcon9-return-{engine_count}"
+      return True
     future = self._return_mpc_prebuild_future
     if future is not None and future.done():
       try:
@@ -737,6 +855,7 @@ class RocketSimulation:
     if cached is None:
       return False
     self._mpc_config, self.mpc = cached
+    self._mpc_process_key = f"falcon9-return-{engine_count}"
     return True
 
   def _configure_landing_loadout(self) -> None:
@@ -950,6 +1069,9 @@ class RocketSimulation:
     if self._mpc_executor is not None:
       self._mpc_executor.shutdown(wait=False, cancel_futures=True)
       self._mpc_executor = None
+    if self._mpc_process_executor is not None:
+      self._mpc_process_executor.shutdown(wait=False, cancel_futures=True)
+      self._mpc_process_executor = None
     if self._flight_log_file is not None:
       self._flight_log_file.flush()
       self._flight_log_file.close()
@@ -960,6 +1082,17 @@ class RocketSimulation:
     """Compile and cache the MPC problem without changing the vehicle state."""
 
     if not isinstance(self.mpc, SixDofMPC):
+      return
+    if self._mpc_process_executor is not None:
+      self._mpc_process_executor.submit(
+        _warm_process_mpc_controller,
+        self._mpc_process_key,
+        self._mpc_config,
+        self._mpc_state(),
+        self._mpc_target_state(),
+        self._current_actuator_control(),
+        self._mpc_gimbal_limit_radians(),
+      ).result()
       return
     self.mpc.solve(
       self._mpc_state(),
@@ -1056,6 +1189,12 @@ class RocketSimulation:
       self.center_of_mass_position_world()[0:2]
       + self.center_of_mass_velocity_world()[0:2] * time_to_impact
     )
+
+  @property
+  def async_mpc_worker_kind(self) -> str:
+    if not self.asynchronous_mpc:
+      return "OFF"
+    return "PROCESS" if self._mpc_process_executor is not None else "THREAD"
 
   @property
   def terminal_handoff_height_m(self) -> float:
@@ -2829,7 +2968,7 @@ class RocketSimulation:
       self._apply_mpc_result(result)
 
   def _request_mpc_solution(self) -> None:
-    if self.mpc is None:
+    if self.mpc is None and self._mpc_process_executor is None:
       return
     state = self._mpc_state()
     target = self._mpc_target_state()
@@ -2837,6 +2976,28 @@ class RocketSimulation:
     max_gimbal_radians = self._mpc_gimbal_limit_radians()
     central_differences = self.landing_active
     self.last_mpc_request_time = float(self.data.time)
+    if self._mpc_process_executor is not None and isinstance(
+      self.mpc, SixDofMPC
+    ):
+      self._mpc_future = self._mpc_process_executor.submit(
+        _solve_mpc_process_job,
+        self._mpc_process_key,
+        self._mpc_config,
+        self._mpc_generation,
+        self.last_mpc_request_time,
+        state,
+        target,
+        previous,
+        max_gimbal_radians,
+        central_differences,
+      )
+      self._mpc_future_metadata = (
+        self._mpc_generation,
+        self.last_mpc_request_time,
+        target[POSITION].copy(),
+        target[VELOCITY].copy(),
+      )
+      return
     if self._mpc_executor is None:
       if isinstance(self.mpc, SixDofMPC):
         result = self.mpc.solve(
@@ -3552,7 +3713,7 @@ class RocketSimulation:
         control_line = f"CTRL SCVX MPC {timing}: WARMING"
       else:
         timing = (
-          "ASYNC+INNER"
+          f"ASYNC-{self.async_mpc_worker_kind}+INNER"
           if self.asynchronous_mpc
           else "SYNC+INNER" if self.full_stack_loadout else "SYNC"
         )
@@ -4653,7 +4814,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     "--async-mpc",
     action="store_true",
     help=(
-      "solve MPC guidance on a background worker while a deterministic "
+      "solve MPC guidance in an isolated worker process while a deterministic "
       "200 Hz inner loop tracks its latency-compensated trajectory"
     ),
   )
@@ -4674,6 +4835,7 @@ def main() -> None:
   )
   if flight_log_path is not None:
     print(f"Async final-approach log: {flight_log_path.resolve()}")
+    print(f"Async MPC worker: {simulation.async_mpc_worker_kind.lower()}")
   simulation.warm_up_mpc()
   RocketWindow(simulation).run()
 

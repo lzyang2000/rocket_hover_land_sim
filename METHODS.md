@@ -299,7 +299,7 @@ The paper primarily presents trajectory optimization. This simulator turns that 
 
 The interactive launcher uses synchronous MPC by default. Each solve samples the current MuJoCo state and current GUI target, and its first command is applied before physics advances again. This removes state and target age at the cost of a brief rendering and input pause during each solve. A throwaway solve before window creation pays the one-time CVXPY canonicalization cost during startup.
 
-Passing `--async-mpc` selects a two-layer controller instead of holding delayed actuator commands:
+Passing `--async-mpc` selects a two-layer controller instead of holding delayed actuator commands. SCvx runs in a persistent worker process, separating its Python/CVXPY work and GIL from the MuJoCo/render process. Systems that cannot create the process worker retain a thread-based compatibility fallback:
 
 1. the background SCvx job records its request simulation time and sampled target;
 2. optimized controls are rolled through the nonlinear 6-DOF model to produce a physically consistent predicted trajectory;
@@ -308,7 +308,9 @@ Passing `--async-mpc` selects a two-layer controller instead of holding delayed 
 5. a bounded preview point supplies position, velocity, and bounded vertical-acceleration references: 1.05 s for hover and one 0.35 s prediction interval for landing;
 6. the deterministic controller runs at every 0.005 s MuJoCo step and recomputes bounded thrust, gimbal, and roll commands.
 
-The full-stack mission knows in advance that return uses a three-engine cluster followed by one engine. Async mode constructs both corresponding CVXPY/SCvx problem objects on its worker during ascent. Separation and engine-count transition then install the cached controller in constant-time bookkeeping rather than constructing an optimization problem on the render/physics thread. This removes the separation-time controller-build spike without changing synchronous behavior.
+The full-stack mission knows in advance that return uses a three-engine cluster followed by one engine. Async mode constructs both corresponding CVXPY/SCvx problem objects in the solve process during ascent and keeps only their immutable configurations in the render process. Separation and engine-count transition then select the cached configuration in constant-time bookkeeping rather than constructing an optimization problem on the render/physics thread. The thread compatibility path prebuilds its local controllers in the background. This removes the separation-time controller-build spike without changing synchronous behavior.
+
+On the development Mac, a representative active full-stack solve previously raised 5 ms physics-step latency from a 1.18 ms median to 30.2 ms p99 with a 59.5 ms maximum under the thread worker. The isolated process measured a 0.74 ms median, 2.77 ms p99, and 4.17 ms maximum under the same workload, keeping the main simulation inside its timestep budget.
 
 The preview reference is shifted and strongly blended toward the latest GUI or landing target. Hover uses a longer preview and moderately higher position gain for responsiveness. Landing uses one prediction interval, the original deterministic position gain, and the latest requested descent velocity for stronger alignment damping. Horizontal MPC acceleration is intentionally not used as direct feed-forward. A tall gimbaled rocket is non-minimum-phase: the engine initially counter-gimbals to rotate the stage, so the optimized early horizontal acceleration can point opposite the eventual translation. Feeding that acceleration directly into a body-direction controller caused the async loop to swing. The high-rate feedback loop instead infers the required horizontal acceleration from position and measured velocity, while retaining capped vertical feed-forward.
 
@@ -340,7 +342,7 @@ Telemetry distinguishes:
 
 - `SCVX MPC: OPTIMAL`;
 - `SCVX MPC SYNC+INNER: OPTIMAL` for full-stack return;
-- `SCVX MPC ASYNC+INNER: OPTIMAL`;
+- `SCVX MPC ASYNC-PROCESS+INNER: OPTIMAL`, or `ASYNC-THREAD+INNER` on the compatibility fallback;
 - `SCVX MPC: WARMING`;
 - `6-DOF TERMINAL`;
 - `6-DOF PD`, including async rejection reasons such as `STALE`, `STATE_MISMATCH`, or `DYNAMICS_DEFECT`;
